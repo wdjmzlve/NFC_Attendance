@@ -1,0 +1,97 @@
+# ================================
+# Keil MDK (STM32F407 工程)
+# ================================
+
+# 用户个性化项目设置（每个人的配置不同，不应共享）
+*.uvoptx
+*.uvguix.*
+*.uvgui.*
+*.scvd
+*.dbg
+*.dep
+
+# 编译生成的中间文件（Objects 和 Listings 文件夹）
+/Objects/
+/Listings/
+*.crf
+*.htm
+*.lnp
+*.o
+*.d
+*.axf
+*.elf
+*.bin
+*.hex
+*.map
+
+# Keil 临时备份文件
+*.bak
+*~
+
+
+# ================================
+# Qt5 (C++ 上位机，含 RK3576 交叉编译)
+# ================================
+
+# Qt Creator 用户专属配置文件（绝对不要上传）
+*.pro.user
+*.pro.user.*
+*.creator.user
+*.creator.user.*
+
+# Qt 影子构建目录（常见的构建输出文件夹）
+build-*/
+*-build-*/
+debug/
+release/
+*.build/
+
+# Qt 编译时自动生成的 MOC / UI / QRC 源文件
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+
+# 编译后的库文件与可执行文件（Windows / Linux / Mac）
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+
+# ================================
+# 通用操作系统与编辑器垃圾文件
+# ================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Linux 临时文件
+*.tmp
+*.log
+
+# 常见编辑器（VSCode / Vim / IDEA）
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 编译输出日志
+*.log
+
+
+# ================================
+# 项目文档与专用忽略项
+# ================================
+
+# 根据你的要求，排除 CLAUDE.md（AI 规则文件，不应提交至仓库）
+CLAUDE.md
