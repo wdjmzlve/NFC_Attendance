@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "usart.h"
-
+#include "u8g2.h"
 /* -------------------------------------------------------------------------- */
 /*  Constants and Macros                                                      */
 /* -------------------------------------------------------------------------- */
@@ -37,6 +37,13 @@
 #define LINE2_Y   26U
 #define LINE3_Y   40U
 #define LINE4_Y   54U
+
+/* Name/Sector bitmap dimensions (SSD1306 page format: 161 = ceil(80/8) * 16 + 1) */
+#define NAME_BMP_W     80U
+#define NAME_BMP_H     16U
+#define SECTOR_BMP_W   80U
+#define SECTOR_BMP_H   16U
+#define BMP_TOTAL_BYTES 322U  /* 161 Name + 161 Sector */
 
 /* Key pin macros */
 #define KEY_MODE_PIN      KEY1_Pin
@@ -83,6 +90,11 @@ typedef enum {
 
 #define CARD_QUEUE_SIZE  4U
 osMessageQueueId_t cardQueueHandle;
+
+/* Card bitmap buffers: read from sectors 9+, used by display task */
+static uint8_t card_name_bmp[161];
+static uint8_t card_sector_bmp[161];
+static uint8_t card_has_bmp = 0;
 
 /* -------------------------------------------------------------------------- */
 /*  Helper: Short Beep                                                        */
@@ -381,6 +393,7 @@ void Task_Display(void *argument)
             /* Logo on left half: 64x64 native page-format bitmap */
             OLED_DrawBitmap(0, 0, 64, 64, logo);
 
+
             /* Chinese course name on right side (wqy12, 12px font) */
             OLED_SetFont(u8g2_font_wqy12_t_gb2312);
             OLED_DrawUTF8(68, 12,  "专业综合");
@@ -455,23 +468,24 @@ void Task_Display(void *argument)
                      card_info.uid[2], card_info.uid[3]);
             OLED_ShowString(0, 8, line_buf);
 
-            /* Student name (Chinese, wqy12 font) */
+            /* Name bitmap (Chinese dot-matrix from card sectors 9+) */
             OLED_SetFont(u8g2_font_wqy12_t_gb2312);
-            OLED_DrawUTF8(0, 20,  "Name: 姓名");
-            /* Student ID in decimal + card type */
-            OLED_SetFont(u8g2_font_6x10_tf);
+            OLED_DrawUTF8(0, 20, "姓名:");
+            if (card_has_bmp) {
+                OLED_DrawBitmap(24, 10, NAME_BMP_W, NAME_BMP_H, card_name_bmp);
+            }
+
+            /* Student ID in decimal */
             snprintf(line_buf, sizeof(line_buf),
                      "ID: %lu", (unsigned long)card_info.id_num);
             OLED_ShowString(0, 32, line_buf);
 
-            if (card_info.card_type == CARD_TYPE_NORMAL) {
-                OLED_ShowString(0, 44, "Type: Normal");
-            } else if (card_info.card_type == CARD_TYPE_IMAGE) {
-                OLED_ShowString(0, 44, "Type: Image");
-            } else if (card_info.card_type == CARD_TYPE_ADMIN) {
-                OLED_ShowString(0, 44, "Type: Admin");
-            } else {
-                OLED_ShowString(0, 44, "Type: Unknown");
+            /* Department label (Chinese) + Sector bitmap from card */
+            OLED_SetFont(u8g2_font_wqy12_t_gb2312);
+            OLED_DrawUTF8(0, 44, "部门:");
+            if (card_has_bmp) {
+                OLED_DrawBitmap(24, 35, SECTOR_BMP_W, SECTOR_BMP_H,
+                                card_sector_bmp);
             }
 			
 
@@ -485,7 +499,7 @@ void Task_Display(void *argument)
                      card_info.timestamp.hour,
                      card_info.timestamp.minute,
                      card_info.timestamp.second);
-            OLED_ShowString(0, 56, line_buf);
+            OLED_ShowString(0, 60, line_buf);
 
 //            OLED_ShowString(0, 56, "MODE: back to clock");
         }
@@ -554,9 +568,56 @@ void Task_CardRead(void *argument)
         /* Authenticate Sector 0 (trailer = block 3), then write block 1 */
         if (RC522_AuthState(RC522_PICC_AUTHENT1A,
                             3, default_key, uid) == RC522_OK) {
-//            RC522_Write(1, write_buf);
-			RC522_WriteBlock(0,1,write_buf);
+            RC522_WriteBlock(0, 1, write_buf);
         }
+
+        /*
+         * Write Name[] + Sector[] to sectors 9-13, blocks 0-2 (240 bytes).
+         * Bytes are walked sequentially, packed into 16-byte blocks, and
+         * written to consecutive data blocks across 5 sectors.
+         */
+        {
+            uint8_t  blk_buf[16];
+            uint8_t  sec = 9, blk = 0;
+            uint16_t pos = 0, arr_idx;
+            const uint8_t *arrays[2];
+            uint16_t arr_len[2];
+
+            arrays[0]  = (const uint8_t *)Name;
+            arrays[1]  = (const uint8_t *)Sector;
+            arr_len[0] = 161U;
+            arr_len[1] = 161U;
+
+            for (arr_idx = 0; arr_idx < 2U; arr_idx++) {
+                uint16_t j;
+                for (j = 0; j < arr_len[arr_idx]; j++) {
+                    blk_buf[pos % 16U] = arrays[arr_idx][j];
+                    pos++;
+                    if ((pos % 16U) == 0U) {
+                        if (RC522_AuthState(RC522_PICC_AUTHENT1A,
+                                            (uint8_t)(sec * 4U + 3U),
+                                            default_key, uid) == RC522_OK) {
+                            RC522_WriteBlock(sec, blk, blk_buf);
+                        }
+                        blk++;
+                        if (blk >= 3U) { blk = 0U; sec++; }
+                    }
+                }
+            }
+            /* Write remaining partial block padded with 0x00 */
+            if ((pos % 16U) != 0U) {
+                while ((pos % 16U) != 0U) {
+                    blk_buf[pos % 16U] = 0x00;
+                    pos++;
+                }
+                if (RC522_AuthState(RC522_PICC_AUTHENT1A,
+                                    (uint8_t)(sec * 4U + 3U),
+                                    default_key, uid) == RC522_OK) {
+                    RC522_WriteBlock(sec, blk, blk_buf);
+                }
+            }
+        }
+
         RC522_Halt();
         RC522_WaitCardOff();
     }
@@ -605,6 +666,37 @@ void Task_CardRead(void *argument)
                           |  (uint32_t)block_data[7];
                     }
                 }
+            }
+
+            /*
+             * Read Name + Sector bitmaps from Sectors 9+ onward.
+             * Blocks are filled sequentially: 0, 1, 2 of each sector.
+             */
+            {
+                uint8_t  blk_buf[16];
+                uint8_t  sec = 9, blk = 0;
+                uint16_t pos = 0;
+
+                while (pos < BMP_TOTAL_BYTES) {
+                    if (blk >= 3U) { blk = 0U; sec++; }
+                    if (RC522_AuthState(RC522_PICC_AUTHENT1A,
+                                        (uint8_t)(sec * 4U + 3U),
+                                        default_key, uid) == RC522_OK) {
+                        if (RC522_ReadBlock(sec, blk, blk_buf) == RC522_OK) {
+                            uint8_t k;
+                            for (k = 0; k < 16U && pos < BMP_TOTAL_BYTES; k++) {
+                                if (pos < 161U) {
+                                    card_name_bmp[pos] = blk_buf[k];
+                                } else {
+                                    card_sector_bmp[pos - 161U] = blk_buf[k];
+                                }
+                                pos++;
+                            }
+                        }
+                    }
+                    blk++;
+                }
+                card_has_bmp = 1;
             }
 
             /* Halt card so it can be re-detected */

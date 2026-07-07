@@ -265,7 +265,8 @@
 #define	XXXXXXX_	0xfe
 #define	XXXXXXXX	0xff
 
-extern const unsigned char Name[];
+extern const unsigned char Name[161];
+extern const unsigned char Sector[161];
 extern const unsigned char Profile[];
 extern const unsigned char logo[];
 

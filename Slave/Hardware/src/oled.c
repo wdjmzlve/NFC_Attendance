@@ -180,7 +180,7 @@ void OLED_Refresh(void)
 void OLED_DrawBitmap(uint8_t x, uint8_t y, uint8_t w, uint8_t h,
                      const uint8_t *bitmap)
 {
-    u8g2_DrawBitmap(&u8g2, x, y, (w + 7U) / 8U, h, bitmap);
+    u8g2_DrawBitmap(&u8g2, x, y, (w + 7U) / 8U , h, bitmap);
 }
 
 /**
