@@ -21,7 +21,7 @@
 #include "rtc.h"
 
 /* USER CODE BEGIN 0 */
-
+#include "bsp_rtc.h"
 /* USER CODE END 0 */
 
 RTC_HandleTypeDef hrtc;
@@ -56,7 +56,16 @@ void MX_RTC_Init(void)
   }
 
   /* USER CODE BEGIN Check_RTC_BKUP */
-
+  /* Check if RTC was already initialized on a previous boot.
+   * If the backup domain is still powered (VBAT battery present),
+   * the magic number will be preserved and we skip re-initializing
+   * the time/date to keep the current time running.
+   *
+   * On first power-on, or when VBAT is not backed up, the magic
+   * number will be absent and we proceed to set the default time. */
+  if (HAL_RTCEx_BKUPRead(&hrtc, BSP_RTC_BKUP_DR) == BSP_RTC_BKUP_MAGIC) {
+      return;  /* RTC already running with valid time, skip default setting */
+  }
   /* USER CODE END Check_RTC_BKUP */
 
   /** Initialize RTC and set the Time and Date
@@ -80,7 +89,8 @@ void MX_RTC_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN RTC_Init 2 */
-
+  /* Mark RTC as initialized so subsequent resets keep the current time */
+  HAL_RTCEx_BKUPWrite(&hrtc, BSP_RTC_BKUP_DR, BSP_RTC_BKUP_MAGIC);
   /* USER CODE END RTC_Init 2 */
 
 }

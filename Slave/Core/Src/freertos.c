@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "oled.h"
 #include "rc522.h"
+#include "app_tasks.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -89,7 +90,8 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
+  /* Card info queue: CardRead task -> Display task */
+  cardQueueHandle = osMessageQueueNew(4, sizeof(CardInfo_t), NULL);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -97,7 +99,25 @@ void MX_FREERTOS_Init(void) {
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  /* Display task: clock + settings UI + card info display */
+  {
+      static const osThreadAttr_t displayTask_attr = {
+          .name = "Task_Display",
+          .stack_size = 256 * 4,
+          .priority = osPriorityNormal,
+      };
+      osThreadNew(Task_Display, NULL, &displayTask_attr);
+  }
+
+  /* Card read task: RC522 polling */
+  {
+      static const osThreadAttr_t cardReadTask_attr = {
+          .name = "Task_CardRead",
+          .stack_size = 256 * 4,
+          .priority = osPriorityNormal,
+      };
+      osThreadNew(Task_CardRead, NULL, &cardReadTask_attr);
+  }
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -117,32 +137,13 @@ void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
 
-  /* Initialize OLED and display welcome message */
-  OLED_Init();
-  OLED_Clear();
-  OLED_ShowString(0, 10, "HDU NFC");
-  OLED_ShowString(0, 30, "STM32F407VET6");
-  OLED_Refresh();
-
-  /* Initialize RC522 RFID reader */
-//  RC522_Init();
-//  printf("RC522 initialized.\r\n");
+  /* Hardware initialization now handled by Task_Display and Task_CardRead.
+   * This default task is kept idle to preserve the CubeMX task framework. */
 
   /* Infinite loop */
   for(;;)
   {
-    /* Poll for card once every 500ms */
-//	 RC522_Handle();
-        /* Update OLED with UID */
-        OLED_Clear();
-        OLED_ShowString(0, 10, "Card detected");
-        OLED_ShowString(0, 40, "UID printed");
-        OLED_Refresh();
-
-  
-    
-
-    osDelay(500);
+    osDelay(1000);
   }
   /* USER CODE END StartDefaultTask */
 }
