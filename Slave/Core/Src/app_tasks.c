@@ -1,6 +1,6 @@
 /**
  * @file    app_tasks.c
- * @brief   Application tasks: Display (clock/settings/card) and CardRead (RC522)
+ * @brief   Application tasks: Display (splash/clock/card/settings) and CardRead
  * @note    UTF-8 encoding
  */
 
@@ -9,30 +9,34 @@
 #include "oled.h"
 #include "rc522.h"
 #include "bsp_rtc.h"
+#include "gui.h"
+#include "ds18b20.h"
 #include <stdio.h>
 #include <string.h>
 #include "usart.h"
+
 /* -------------------------------------------------------------------------- */
 /*  Constants and Macros                                                      */
 /* -------------------------------------------------------------------------- */
 
 /* Task periods (ms) */
-#define DISPLAY_PERIOD_MS       50U    /* Display task polling interval       */
-#define CARD_READ_PERIOD_MS     300U   /* Card polling interval               */
+#define DISPLAY_PERIOD_MS       50U
+#define CARD_READ_PERIOD_MS     300U
+#define SPLASH_DURATION_MS      3000U
+#define CARD_DISPLAY_MS         3000U
+#define TEMP_READ_PERIOD_MS     2000U
+#define BEEP_DURATION_MS        80U
 
-/* Key debounce and timing (ms) */
-#define KEY_LONG_PRESS_MS       600U   /* Hold duration before auto-repeat    */
-#define KEY_REPEAT_MS           150U   /* Auto-repeat interval                */
-#define BLINK_PERIOD_MS         500U   /* Blink on/off period                 */
-#define CARD_DISPLAY_MS         3000U  /* How long card info stays on screen  */
-#define BEEP_DURATION_MS        80U    /* Beep length on card detect          */
+/* Key timing (ms) */
+#define KEY_LONG_PRESS_MS       600U
+#define KEY_REPEAT_MS           150U
+#define BLINK_PERIOD_MS         500U
 
-/* Display layout (pixels) - 6x10 font: ~21 chars/line, ~6 lines */
+/* Display layout Y coordinates (pixels) */
 #define LINE1_Y   12U
-#define LINE2_Y   25U
-#define LINE3_Y   38U
-#define LINE4_Y   51U
-#define LINE5_Y   62U
+#define LINE2_Y   26U
+#define LINE3_Y   40U
+#define LINE4_Y   54U
 
 /* Key pin macros */
 #define KEY_MODE_PIN      KEY1_Pin
@@ -42,17 +46,25 @@
 #define KEY_DOWN_PIN      KEY3_Pin
 #define KEY_DOWN_PORT     KEY3_GPIO_Port
 
-/* Key press detection (all three keys use Pull-Up, pressed = LOW) */
 #define KEY_IS_PRESSED(port, pin)  (HAL_GPIO_ReadPin((port), (pin)) == GPIO_PIN_RESET)
+
+/*
+ * LED macros: LEDs are open-drain output, anode to VCC, cathode to GPIO.
+ * GPIO_PIN_RESET (LOW)  = NMOS on  = current flows = LED ON
+ * GPIO_PIN_SET   (HIGH) = NMOS off = Hi-Z         = LED OFF
+ */
+#define LED_ON(port, pin)   HAL_GPIO_WritePin((port), (pin), GPIO_PIN_RESET)
+#define LED_OFF(port, pin)  HAL_GPIO_WritePin((port), (pin), GPIO_PIN_SET)
 
 /* -------------------------------------------------------------------------- */
 /*  Display State Machine                                                     */
 /* -------------------------------------------------------------------------- */
 
 typedef enum {
-    DISP_MODE_CLOCK,      /* Normal clock display                            */
-    DISP_MODE_SETTING,    /* Time setting mode                               */
-    DISP_MODE_CARD        /* Card detected overlay                           */
+    DISP_MODE_SPLASH,     /* Boot splash screen (3 sec)                       */
+    DISP_MODE_CLOCK,      /* Clock + temperature standby                      */
+    DISP_MODE_SETTING,    /* Date/time setting via keys                       */
+    DISP_MODE_CARD        /* Card detected info overlay                       */
 } DispMode_t;
 
 typedef enum {
@@ -83,17 +95,16 @@ static void Beep(uint32_t duration_ms)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Helper: Blink-field String Builder                                       */
+/*  Helper: Blink-field String Builder                                        */
 /* -------------------------------------------------------------------------- */
 /**
  * @brief  Replace the selected date/time field with spaces when blink is off
  * @param  buf:      string buffer to modify in-place (e.g. "2026-07-01")
- * @param  blink_on: 1 = show field, 0 = hide field (replace with spaces)
- * @param  field_id: which field is currently selected (FIELD_YEAR .. FIELD_SECOND)
+ * @param  blink_on: 1 = show field, 0 = hide field
+ * @param  field_id: which field is selected (FIELD_YEAR .. FIELD_SECOND)
  */
 static void ApplyBlink(char *buf, uint8_t blink_on, uint8_t field_id)
 {
-    /* Field definitions: {field_id, start_pos, width} */
     struct {
         uint8_t id;
         uint8_t pos;
@@ -109,7 +120,7 @@ static void ApplyBlink(char *buf, uint8_t blink_on, uint8_t field_id)
     const uint8_t field_count = sizeof(fields) / sizeof(fields[0]);
     uint8_t i;
 
-    if (blink_on) return; /* Nothing to hide */
+    if (blink_on) return;
 
     for (i = 0; i < field_count; i++) {
         if (fields[i].id == field_id) {
@@ -131,67 +142,87 @@ static uint8_t ClampDay(uint8_t day, uint16_t year, uint8_t month)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Task: Display (Clock + Settings + Card UI)                                */
+/*  Task: Display (Splash + Clock + Settings + Card UI)                       */
 /* -------------------------------------------------------------------------- */
 void Task_Display(void *argument)
 {
     (void)argument;
 
-    DispMode_t mode = DISP_MODE_CLOCK;
-    SetField_t field = FIELD_YEAR;
-    BSP_RTC_DateTime_t dt;        /* Working copy for setting mode */
+    /* Wait for SSD1306 power-on reset (~150ms needed). */
+    osDelay(200);
+
+    /* Initialize OLED, DS18B20 temperature sensor */
+    OLED_Init();
+    ds18b20_init();
+
+    /* Turn off all LEDs initially */
+    LED_OFF(LED1_GPIO_Port, LED1_Pin);
+    LED_OFF(LED2_GPIO_Port, LED2_Pin);
+    LED_OFF(LED3_GPIO_Port, LED3_Pin);
+
+    /* ---- Splash mode state ---- */
+    DispMode_t mode = DISP_MODE_SPLASH;
+    uint32_t splash_deadline = osKernelGetTickCount() + SPLASH_DURATION_MS;
+
+    /* ---- Clock / card state ---- */
+    BSP_RTC_DateTime_t dt;
     CardInfo_t card_info;
     uint32_t card_show_deadline = 0;
+    float    temperature = 0.0f;
+    uint32_t last_temp_read = 0;
 
-    /* Key state tracking */
+    /* ---- Setting mode state ---- */
+    SetField_t field = FIELD_YEAR;
     uint8_t  key_mode_prev = 0, key_up_prev = 0, key_down_prev = 0;
-    uint32_t key_up_tick  = 0, key_down_tick  = 0;
-    uint32_t key_up_repeat  = 0, key_down_repeat = 0;
-
-    /* Blink state */
-    uint8_t  blink_on = 1;
+    uint32_t key_up_tick    = 0, key_down_tick    = 0;
+    uint32_t key_up_repeat  = 0, key_down_repeat  = 0;
+    uint8_t  blink_on       = 1;
     uint32_t last_blink_tick = 0;
 
     /* Display buffers */
     char line_buf[24];
-    const char *weekdays[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    const char *weekdays[]   = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
     const char *field_names[] = {"YEAR","MONTH","DAY","HOUR","MIN","SEC"};
-
-    /* Wait for SSD1306 power-on reset to complete (~150ms needed).
-     * On cold boot the OLED chip is not ready when MCU starts;
-     * on warm reset power was already stable, so no issue. */
-    osDelay(200);
-
-    /* Initialize OLED once */
-    OLED_Init();
 
     for (;;) {
         uint32_t now = osKernelGetTickCount();
 
         /* ---- Read keys ---- */
         uint8_t key_mode  = KEY_IS_PRESSED(KEY_MODE_PORT, KEY_MODE_PIN);
-        uint8_t key_up    = KEY_IS_PRESSED(KEY_UP_PORT, KEY_UP_PIN);
+        uint8_t key_up    = KEY_IS_PRESSED(KEY_UP_PORT,   KEY_UP_PIN);
         uint8_t key_down  = KEY_IS_PRESSED(KEY_DOWN_PORT, KEY_DOWN_PIN);
 
-        /* ---- Read RTC (only in clock/card modes to preserve setting edits) ---- */
+        /* ---- Read RTC (skip in setting mode to preserve edits) ---- */
         if (mode != DISP_MODE_SETTING) {
             BSP_RTC_GetDateTime(&dt);
+        }
+
+        /* ---- Read temperature (only in clock mode, every 2 sec) ---- */
+        if (mode == DISP_MODE_CLOCK
+            && (now - last_temp_read >= TEMP_READ_PERIOD_MS)) {
+            temperature = ds18b20_read();
+            last_temp_read = now;
+        }
+
+        /* ---- Splash -> Clock transition ---- */
+        if (mode == DISP_MODE_SPLASH) {
+            if ((int32_t)(now - splash_deadline) >= 0) {
+                mode = DISP_MODE_CLOCK;
+            }
         }
 
         /* ---- Key MODE: cycle field / save & exit / enter setting ---- */
         if (key_mode && !key_mode_prev) {
             if (mode == DISP_MODE_CLOCK) {
-                /* Enter setting mode: snapshot current time */
                 BSP_RTC_GetDateTime(&dt);
-                dt.second = 0;  /* Zero seconds on entry for cleaner setting */
-                mode = DISP_MODE_SETTING;
+                dt.second = 0;
+                mode  = DISP_MODE_SETTING;
                 field = FIELD_YEAR;
                 blink_on = 1;
                 last_blink_tick = now;
             } else if (mode == DISP_MODE_SETTING) {
                 field = (SetField_t)((uint8_t)field + 1U);
                 if (field >= FIELD_COUNT) {
-                    /* Save and exit */
                     dt.weekday = BSP_RTC_CalcWeekday(dt.year, dt.month, dt.day);
                     BSP_RTC_SetDateTime(&dt);
                     BSP_RTC_MarkInitialized();
@@ -200,8 +231,10 @@ void Task_Display(void *argument)
                 blink_on = 1;
                 last_blink_tick = now;
             } else if (mode == DISP_MODE_CARD) {
-                /* Dismiss card display early */
                 mode = DISP_MODE_CLOCK;
+                LED_OFF(LED1_GPIO_Port, LED1_Pin);
+                LED_OFF(LED2_GPIO_Port, LED2_Pin);
+                LED_OFF(LED3_GPIO_Port, LED3_Pin);
             }
         }
 
@@ -317,67 +350,133 @@ void Task_Display(void *argument)
         if (osMessageQueueGet(cardQueueHandle, &card_info, NULL, 0) == osOK) {
             mode = DISP_MODE_CARD;
             card_show_deadline = now + CARD_DISPLAY_MS;
+
+            /* Update card status LEDs */
+            LED_ON(LED1_GPIO_Port, LED1_Pin);
+            if (card_info.card_type == CARD_TYPE_NORMAL) {
+                LED_ON(LED2_GPIO_Port, LED2_Pin);
+                LED_OFF(LED3_GPIO_Port, LED3_Pin);
+            } else if (card_info.card_type == CARD_TYPE_IMAGE) {
+                LED_OFF(LED2_GPIO_Port, LED2_Pin);
+                LED_ON(LED3_GPIO_Port, LED3_Pin);
+            } else {
+                LED_OFF(LED2_GPIO_Port, LED2_Pin);
+                LED_OFF(LED3_GPIO_Port, LED3_Pin);
+            }
         }
 
         /* ---- Card display timeout ---- */
-        if (mode == DISP_MODE_CARD && ((int32_t)(now - card_show_deadline) >= 0)) {
+        if (mode == DISP_MODE_CARD
+            && ((int32_t)(now - card_show_deadline) >= 0)) {
             mode = DISP_MODE_CLOCK;
+            LED_OFF(LED1_GPIO_Port, LED1_Pin);
+            LED_OFF(LED2_GPIO_Port, LED2_Pin);
+            LED_OFF(LED3_GPIO_Port, LED3_Pin);
         }
 
         /* ---- Render to OLED ---- */
         OLED_Clear();
 
-        if (mode == DISP_MODE_CLOCK) {
-            /* Line 1: YYYY-MM-DD  Www */
+        if (mode == DISP_MODE_SPLASH) {
+            /* Logo on left half: 64x64 native page-format bitmap */
+            OLED_DrawBitmap(0, 0, 64, 64, logo);
+
+            /* Chinese course name on right side (wqy12, 12px font) */
+            OLED_SetFont(u8g2_font_wqy12_t_gb2312);
+            OLED_DrawUTF8(68, 12,  "专业综合");
+            OLED_DrawUTF8(68, 25, "实践||");
+
+            /* Project name in ASCII (6x10 font) */
+            OLED_SetFont(u8g2_font_6x10_tf);
+            OLED_ShowString(68, 44, "NFC");
+            OLED_ShowString(68, 54, "Attendance");
+
+        } else if (mode == DISP_MODE_CLOCK) {
+            OLED_SetFont(u8g2_font_6x10_tf);
+
+            /* Date + weekday */
             snprintf(line_buf, sizeof(line_buf),
-                     "%04u-%02u-%02u  %s",
+                     "%04u-%02u-%02u %s",
                      dt.year, dt.month, dt.day, weekdays[dt.weekday]);
             OLED_ShowString(0, LINE1_Y, line_buf);
 
-            /* Line 2-3: Large-style time centered */
+            /* Time */
             snprintf(line_buf, sizeof(line_buf),
                      "     %02u:%02u:%02u",
                      dt.hour, dt.minute, dt.second);
             OLED_ShowString(0, LINE2_Y, line_buf);
 
-            /* Line 4: status */
-            OLED_ShowString(0, LINE4_Y, "  Waiting card...");
+            /* Status text */
+            OLED_ShowString(0, LINE3_Y, "Waiting card...");
+
+            /* Temperature: right-aligned at bottom */
+            snprintf(line_buf, sizeof(line_buf),
+                     "%.1fC", (double)temperature);
+            {
+                uint8_t temp_len = (uint8_t)strlen(line_buf);
+                OLED_ShowString((uint8_t)(128U - temp_len * 6U),
+                                LINE4_Y, line_buf);
+            }
 
         } else if (mode == DISP_MODE_SETTING) {
-            /* Title */
-            OLED_ShowString(0, LINE1_Y, "=== SET DATE/TIME ===");
+            OLED_SetFont(u8g2_font_6x10_tf);
+
+            OLED_ShowString(0, 4, "=== SET DATE/TIME ===");
 
             /* Date: blink only when editing YEAR/MONTH/DAY */
-            OLED_ShowString(0, LINE2_Y, "D:");
+            OLED_ShowString(0, 16, "D:");
             snprintf(line_buf, sizeof(line_buf),
                      "%04u-%02u-%02u", dt.year, dt.month, dt.day);
             ApplyBlink(line_buf,
                        (field <= FIELD_DAY) ? blink_on : 1, field);
-            OLED_ShowString(12, LINE2_Y, line_buf);
+            OLED_ShowString(12, 16, line_buf);
 
             /* Time: blink only when editing HOUR/MINUTE/SECOND */
             snprintf(line_buf, sizeof(line_buf),
                      "%02u:%02u:%02u", dt.hour, dt.minute, dt.second);
             ApplyBlink(line_buf,
                        (field >= FIELD_HOUR) ? blink_on : 1, field);
-            OLED_ShowString(0, LINE3_Y, "T:");
-            OLED_ShowString(12, LINE3_Y, line_buf);
+            OLED_ShowString(0, 30, "T:");
+            OLED_ShowString(12, 30, line_buf);
 
-            /* Field indicator */
+            /* Field name and hints */
             snprintf(line_buf, sizeof(line_buf),
                      "Set: %s  +-:adj", field_names[field]);
-            OLED_ShowString(0, LINE4_Y, line_buf);
-
-            /* Bottom hint */
-            OLED_ShowString(0, LINE5_Y, "MODE:next/save");
+            OLED_ShowString(0, 44, line_buf);
+            OLED_ShowString(0, 56, "MODE:next/save");
 
         } else if (mode == DISP_MODE_CARD) {
+            OLED_SetFont(u8g2_font_6x10_tf);
+
+            /* Card UID header */
             snprintf(line_buf, sizeof(line_buf),
-                     "UID: %02X%02X%02X%02X",
+                     "Card: %02X%02X%02X%02X",
                      card_info.uid[0], card_info.uid[1],
                      card_info.uid[2], card_info.uid[3]);
-            OLED_ShowString(0, LINE1_Y, line_buf);
+            OLED_ShowString(0, 8, line_buf);
 
+            /* Student name (Chinese, wqy12 font) */
+            OLED_SetFont(u8g2_font_wqy12_t_gb2312);
+            OLED_DrawUTF8(0, 20,  "Name: 姓名");
+            /* Student ID in decimal + card type */
+            OLED_SetFont(u8g2_font_6x10_tf);
+            snprintf(line_buf, sizeof(line_buf),
+                     "ID: %lu", (unsigned long)card_info.id_num);
+            OLED_ShowString(0, 32, line_buf);
+
+            if (card_info.card_type == CARD_TYPE_NORMAL) {
+                OLED_ShowString(0, 44, "Type: Normal");
+            } else if (card_info.card_type == CARD_TYPE_IMAGE) {
+                OLED_ShowString(0, 44, "Type: Image");
+            } else if (card_info.card_type == CARD_TYPE_ADMIN) {
+                OLED_ShowString(0, 44, "Type: Admin");
+            } else {
+                OLED_ShowString(0, 44, "Type: Unknown");
+            }
+			
+
+            
+            /* Swipe timestamp */
             snprintf(line_buf, sizeof(line_buf),
                      "%04u-%02u-%02u %02u:%02u:%02u",
                      card_info.timestamp.year,
@@ -386,14 +485,14 @@ void Task_Display(void *argument)
                      card_info.timestamp.hour,
                      card_info.timestamp.minute,
                      card_info.timestamp.second);
-            OLED_ShowString(0, LINE3_Y, line_buf);
+            OLED_ShowString(0, 56, line_buf);
 
-            OLED_ShowString(0, LINE5_Y, "MODE: back to clock");
+//            OLED_ShowString(0, 56, "MODE: back to clock");
         }
 
         OLED_Refresh();
 
-        /* ---- Save previous key states ---- */
+        /* Save previous key states */
         key_mode_prev  = key_mode;
         key_up_prev    = key_up;
         key_down_prev  = key_down;
@@ -403,26 +502,113 @@ void Task_Display(void *argument)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Task: Card Read (RC522 Polling)                                           */
+/*  Task: Card Read (RC522 Polling + Data Read)                               */
 /* -------------------------------------------------------------------------- */
 void Task_CardRead(void *argument)
 {
     (void)argument;
+
     uint8_t uid[4];
+    uint8_t block_data[16];
+    uint8_t write_buf[16];
+    uint8_t default_key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    uint8_t i;
+    uint16_t sum;
     CardInfo_t card_info;
 
-    /* Initialize RC522 platform (DWT + RC522 chip) */
-		RC522_Platform_Init();
+    /* Initialize RC522 platform */
+    RC522_Platform_Init();
+    RC522_ConfigISOType('A');
 
-	RC522_ConfigISOType('A');
+    /*
+     * One-time card issuance: write default account header to
+     * Sector 0, Block 1 of the first card presented after boot.
+     *
+     * Block 1 layout (16 bytes):
+     *   [0..3]   UID (from anticollision)
+     *   [4..7]   Student ID (default: 23040722 -> 0x01,0x5F,0x92,0xD2)
+     *   [8..11]  Reserved (0x00)
+     *   [12]     Card type (0x00=Normal, 0x01=Image, 0x02=Admin)
+     *   [13]     Status flag (0x00)
+     *   [14..15] Checksum = sum(bytes 0-13), little-endian
+     */
+    if (RC522_ScanCard(uid) == RC522_OK) {
+        memset(write_buf, 0, sizeof(write_buf));
+        memcpy(&write_buf[0], uid, 4);               /* UID from card        */
+        write_buf[4]  = 0x01;                         /* Student ID byte 0    */
+        write_buf[5]  = 0x5F;                         /* Student ID byte 1    */
+        write_buf[6]  = 0x92;                         /* Student ID byte 2    */
+        write_buf[7]  = 0xD2;                         /* Student ID byte 3    */
+        /* bytes 8-11 remain 0 (reserved)                                     */
+        write_buf[12] = CARD_TYPE_NORMAL;             /* Card type = Normal   */
+        /* byte 13 remains 0 (status flag)                                    */
+
+        /* 16-bit sum of bytes 0-13, little-endian */
+        sum = 0;
+        for (i = 0; i < 14U; i++) {
+            sum += write_buf[i];
+        }
+        write_buf[14] = (uint8_t)(sum & 0xFFU);
+        write_buf[15] = (uint8_t)((sum >> 8U) & 0xFFU);
+
+        /* Authenticate Sector 0 (trailer = block 3), then write block 1 */
+        if (RC522_AuthState(RC522_PICC_AUTHENT1A,
+                            3, default_key, uid) == RC522_OK) {
+//            RC522_Write(1, write_buf);
+			RC522_WriteBlock(0,1,write_buf);
+        }
+        RC522_Halt();
+        RC522_WaitCardOff();
+    }
 
     for (;;) {
         char status = RC522_ScanCard(uid);
-		printf("%d\r\n",(uint8_t)status);
+        printf("%d\r\n", (uint8_t)status);
+
         if (status == RC522_OK) {
-            /* Populate card info */
+            /* Fill card info basics */
             memcpy(card_info.uid, uid, 4);
             BSP_RTC_GetDateTime(&card_info.timestamp);
+            card_info.card_type = 0;
+            card_info.id_num    = 0;
+
+            /*
+             * Read Sector 0, Block 1 (account header).
+             * Auth on block 3 (trailer of sector 0).
+             *
+             * Block 1 layout:
+             *   [0..3]   UID
+             *   [4..7]   Student ID (big-endian uint32)
+             *   [8..11]  Reserved
+             *   [12]     Card type (0x00=Normal, 0x01=Image, 0x02=Admin)
+             *   [13]     Status flag
+             *   [14..15] Checksum = sum(bytes 0-13), little-endian
+             */
+            status = RC522_AuthState(RC522_PICC_AUTHENT1A,
+                                     3, default_key, uid);
+            if (status == RC522_OK) {
+                status = RC522_Read(1, block_data);
+                if (status == RC522_OK) {
+                    /* Verify checksum: 16-bit sum of bytes 0-13 */
+                    sum = 0;
+                    for (i = 0; i < 14U; i++) {
+                        sum += block_data[i];
+                    }
+                    if ((uint8_t)(sum & 0xFFU) == block_data[14]
+                        && (uint8_t)((sum >> 8U) & 0xFFU) == block_data[15]) {
+                        card_info.card_type = block_data[12];
+                        /* Big-endian ID -> uint32_t */
+                        card_info.id_num =
+                            ((uint32_t)block_data[4] << 24U)
+                          | ((uint32_t)block_data[5] << 16U)
+                          | ((uint32_t)block_data[6] << 8U)
+                          |  (uint32_t)block_data[7];
+                    }
+                }
+            }
+
+            /* Halt card so it can be re-detected */
+            RC522_Halt();
 
             /* Send to display task (non-blocking, drop if queue full) */
             osMessageQueuePut(cardQueueHandle, &card_info, 0, 0);

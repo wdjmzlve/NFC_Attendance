@@ -132,7 +132,7 @@ void OLED_Init(void)
                                             u8x8_byte_hw_i2c, u8x8_gpio_and_delay);
     u8g2_InitDisplay(&u8g2);
     u8g2_SetPowerSave(&u8g2, 0);             /* Wake up display */
-    u8g2_SetFont(&u8g2, u8g2_font_6x10_tf);  /* Set 6x10 font (closest to 6x8) */
+    u8g2_SetFont(&u8g2, u8g2_font_6x10_tf);  /* Set 6x10 font */
     u8g2_ClearBuffer(&u8g2);
     u8g2_SendBuffer(&u8g2);
 }
@@ -166,4 +166,41 @@ void OLED_ShowString(uint8_t x, uint8_t y, const char *str)
 void OLED_Refresh(void)
 {
     u8g2_SendBuffer(&u8g2);
+}
+
+/**
+  * @brief  Draw a bitmap in display-native page format
+  * @param  x: X coordinate (0-127)
+  * @param  y: Y coordinate (0-63)
+  * @param  w: bitmap width in pixels
+  * @param  h: bitmap height in pixels
+  * @param  bitmap: pointer to bitmap data (SSD1306 vertical-page format)
+  * @retval None
+  */
+void OLED_DrawBitmap(uint8_t x, uint8_t y, uint8_t w, uint8_t h,
+                     const uint8_t *bitmap)
+{
+    u8g2_DrawBitmap(&u8g2, x, y, (w + 7U) / 8U, h, bitmap);
+}
+
+/**
+  * @brief  Set current font for subsequent text drawing
+  * @param  font: pointer to u8g2 font data
+  * @retval None
+  */
+void OLED_SetFont(const uint8_t *font)
+{
+    u8g2_SetFont(&u8g2, font);
+}
+
+/**
+  * @brief  Draw UTF-8 encoded string at specified position
+  * @param  x: X coordinate (0-127)
+  * @param  y: Y coordinate of character baseline (0-63)
+  * @param  str: null-terminated UTF-8 string
+  * @retval None
+  */
+void OLED_DrawUTF8(uint8_t x, uint8_t y, const char *str)
+{
+    u8g2_DrawUTF8(&u8g2, x, y, str);
 }

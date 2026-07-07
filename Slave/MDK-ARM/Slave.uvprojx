@@ -411,11 +411,6 @@
               <FilePath>../Core/Src/freertos.c</FilePath>
             </File>
             <File>
-              <FileName>dma.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>../Core/Src/dma.c</FilePath>
-            </File>
-            <File>
               <FileName>i2c.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/i2c.c</FilePath>
@@ -504,6 +499,11 @@
               <FileName>stm32f4xx_hal_timebase_tim.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f4xx_hal_timebase_tim.c</FilePath>
+            </File>
+            <File>
+              <FileName>gui.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\gui.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -934,6 +934,31 @@
               <FileName>bsp_rtc.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Hardware\src\bsp_rtc.c</FilePath>
+            </File>
+            <File>
+              <FileName>esp01s.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\src\esp01s.c</FilePath>
+            </File>
+            <File>
+              <FileName>midi.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\src\midi.c</FilePath>
+            </File>
+            <File>
+              <FileName>uart_drv.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\src\uart_drv.c</FilePath>
+            </File>
+            <File>
+              <FileName>key.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\src\key.c</FilePath>
+            </File>
+            <File>
+              <FileName>led.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\src\led.c</FilePath>
             </File>
           </Files>
         </Group>
