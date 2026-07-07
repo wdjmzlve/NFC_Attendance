@@ -25,7 +25,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "oled.h"
+#include "rc522.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -114,10 +116,33 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+
+  /* Initialize OLED and display welcome message */
+  OLED_Init();
+  OLED_Clear();
+  OLED_ShowString(0, 10, "HDU NFC");
+  OLED_ShowString(0, 30, "STM32F407VET6");
+  OLED_Refresh();
+
+  /* Initialize RC522 RFID reader */
+//  RC522_Init();
+//  printf("RC522 initialized.\r\n");
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    /* Poll for card once every 500ms */
+//	 RC522_Handle();
+        /* Update OLED with UID */
+        OLED_Clear();
+        OLED_ShowString(0, 10, "Card detected");
+        OLED_ShowString(0, 40, "UID printed");
+        OLED_Refresh();
+
+  
+    
+
+    osDelay(500);
   }
   /* USER CODE END StartDefaultTask */
 }

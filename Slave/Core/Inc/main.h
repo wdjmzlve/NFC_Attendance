@@ -67,8 +67,8 @@ void Error_Handler(void);
 #define KEY5_GPIO_Port GPIOE
 #define KEY6_Pin GPIO_PIN_6
 #define KEY6_GPIO_Port GPIOE
-#define SPI2_CS_Pin GPIO_PIN_1
-#define SPI2_CS_GPIO_Port GPIOC
+#define NFC_MOSI_Pin GPIO_PIN_0
+#define NFC_MOSI_GPIO_Port GPIOA
 #define SPI1_CS_Pin GPIO_PIN_4
 #define SPI1_CS_GPIO_Port GPIOC
 #define LED1_Pin GPIO_PIN_8
@@ -87,13 +87,26 @@ void Error_Handler(void);
 #define LED7_GPIO_Port GPIOE
 #define LED8_Pin GPIO_PIN_15
 #define LED8_GPIO_Port GPIOE
+#define NFC_GND_Pin GPIO_PIN_10
+#define NFC_GND_GPIO_Port GPIOB
+#define NFC_MISO_Pin GPIO_PIN_13
+#define NFC_MISO_GPIO_Port GPIOB
+#define NFC_RST_Pin GPIO_PIN_14
+#define NFC_RST_GPIO_Port GPIOB
+#define NFC_NSS_Pin GPIO_PIN_15
+#define NFC_NSS_GPIO_Port GPIOB
+#define NFC_SCK_Pin GPIO_PIN_9
+#define NFC_SCK_GPIO_Port GPIOD
 #define BEEP_Pin GPIO_PIN_4
 #define BEEP_GPIO_Port GPIOB
+#define TEMP_Pin GPIO_PIN_0
+#define TEMP_GPIO_Port GPIOE
 #define KEY1_Pin GPIO_PIN_1
 #define KEY1_GPIO_Port GPIOE
 
 /* USER CODE BEGIN Private defines */
-
+#define DATA_Pin TEMP_Pin
+#define DATA_GPIO_Port TEMP_GPIO_Port
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

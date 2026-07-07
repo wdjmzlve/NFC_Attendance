@@ -900,6 +900,36 @@
               <FileType>1</FileType>
               <FilePath>..\Hardware\src\oled.c</FilePath>
             </File>
+            <File>
+              <FileName>rc522.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\src\rc522.c</FilePath>
+            </File>
+            <File>
+              <FileName>ds18b20.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\src\ds18b20.c</FilePath>
+            </File>
+            <File>
+              <FileName>w25q128.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\src\w25q128.c</FilePath>
+            </File>
+            <File>
+              <FileName>rc522_platform_stm32.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\src\rc522_platform_stm32.c</FilePath>
+            </File>
+            <File>
+              <FileName>delay_us.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\src\delay_us.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_rtc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\src\bsp_rtc.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

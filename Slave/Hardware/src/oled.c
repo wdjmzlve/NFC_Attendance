@@ -1,81 +1,53 @@
-#include "stm32f4xx_hal.h"
-#include "u8g2.h"
+/**
+  ******************************************************************************
+  * @file    oled.c
+  * @brief   OLED SSD1306 driver using u8g2 library over I2C1
+  ******************************************************************************
+  */
+
+/* Includes ------------------------------------------------------------------*/
 #include "oled.h"
-#include "main.h"
 #include "i2c.h"
 
-//I2C_HandleTypeDef hi2c1;
+/* Private variables ---------------------------------------------------------*/
+static u8g2_t u8g2;  /* u8g2 display object, shared across OLED functions */
 
-//void MX_I2C1_Init(void)
-//{
+/* External variables --------------------------------------------------------*/
+extern I2C_HandleTypeDef hi2c1;
 
-//  /* USER CODE BEGIN I2C1_Init 0 */
-
-//  /* USER CODE END I2C1_Init 0 */
-
-//  /* USER CODE BEGIN I2C1_Init 1 */
-
-//  /* USER CODE END I2C1_Init 1 */
-//  hi2c1.Instance = I2C1;
-//  hi2c1.Init.ClockSpeed = 100000;
-//  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-//  hi2c1.Init.OwnAddress1 = 0;
-//  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-//  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-//  hi2c1.Init.OwnAddress2 = 0;
-//  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-//  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-//  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-//  {
-//    Error_Handler();
-//  }
-//  /* USER CODE BEGIN I2C1_Init 2 */
-
-//  /* USER CODE END I2C1_Init 2 */
-
-//}
-
+/* -------------------------------------------------------------------------- */
+/*                          u8g2 I2C byte callback                            */
+/* -------------------------------------------------------------------------- */
 uint8_t u8x8_byte_hw_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr)
 {
-    /* u8g2/u8x8 will never send more than 32 bytes between START_TRANSFER and END_TRANSFER */
-    static uint8_t buffer[128];
+    static uint8_t buffer[128];  /* u8g2 sends max 128 bytes per transfer */
     static uint8_t buf_idx;
     uint8_t *data;
 
     switch (msg)
     {
     case U8X8_MSG_BYTE_INIT:
-    {
-        /* add your custom code to init i2c subsystem */
-        MX_I2C1_Init(); //I2C???
-    }
-    break;
+        /* I2C1 is already initialized in main() via MX_I2C1_Init() */
+        break;
 
     case U8X8_MSG_BYTE_START_TRANSFER:
-    {
         buf_idx = 0;
-    }
-    break;
+        break;
 
     case U8X8_MSG_BYTE_SEND:
-    {
         data = (uint8_t *)arg_ptr;
-
         while (arg_int > 0)
         {
             buffer[buf_idx++] = *data;
             data++;
             arg_int--;
         }
-    }
-    break;
+        break;
 
     case U8X8_MSG_BYTE_END_TRANSFER:
-    {
-        if (HAL_I2C_Master_Transmit(&hi2c1, (OLED_ADDRESS), buffer, buf_idx, 1000) != HAL_OK)
+        if (HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDRESS, buffer, buf_idx, 1000) != HAL_OK)
             return 0;
-    }
-    break;
+        break;
 
     case U8X8_MSG_BYTE_SET_DC:
         break;
@@ -87,60 +59,111 @@ uint8_t u8x8_byte_hw_i2c(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_p
     return 1;
 }
 
-void delay_us(uint32_t time)
-{
-    uint32_t i = 8 * time;
-    while (i--)
-        ;
-}
-
+/* -------------------------------------------------------------------------- */
+/*                     u8g2 GPIO and delay callback                           */
+/* -------------------------------------------------------------------------- */
 uint8_t u8x8_gpio_and_delay(u8x8_t *u8x8, uint8_t msg, uint8_t arg_int, void *arg_ptr)
 {
     switch (msg)
     {
-    case U8X8_MSG_DELAY_100NANO: // delay arg_int * 100 nano seconds
+    case U8X8_MSG_DELAY_100NANO:  /* delay arg_int * 100 ns */
         __NOP();
         break;
-    case U8X8_MSG_DELAY_10MICRO: // delay arg_int * 10 micro seconds
+
+    case U8X8_MSG_DELAY_10MICRO:  /* delay arg_int * 10 us */
         for (uint16_t n = 0; n < 320; n++)
         {
             __NOP();
         }
         break;
-    case U8X8_MSG_DELAY_MILLI: // delay arg_int * 1 milli second
+
+    case U8X8_MSG_DELAY_MILLI:    /* delay arg_int * 1 ms */
         HAL_Delay(1);
         break;
-    case U8X8_MSG_DELAY_I2C: // arg_int is the I2C speed in 100KHz, e.g. 4 = 400 KHz
-        delay_us(5);
-        break;                    // arg_int=1: delay by 5us, arg_int = 4: delay by 1.25us
-    case U8X8_MSG_GPIO_I2C_CLOCK: // arg_int=0: Output low at I2C clock pin
-        break;                    // arg_int=1: Input dir with pullup high for I2C clock pin
-    case U8X8_MSG_GPIO_I2C_DATA:  // arg_int=0: Output low at I2C data pin
-        break;                    // arg_int=1: Input dir with pullup high for I2C data pin
+
+    case U8X8_MSG_DELAY_I2C:      /* I2C bus delay (~5us at 100KHz) */
+        for (uint32_t i = 0; i < 40; i++)
+        {
+            __NOP();
+        }
+        break;
+
+    case U8X8_MSG_GPIO_I2C_CLOCK: /* software I2C clock (unused, HW I2C) */
+        break;
+
+    case U8X8_MSG_GPIO_I2C_DATA:  /* software I2C data (unused, HW I2C) */
+        break;
+
     case U8X8_MSG_GPIO_MENU_SELECT:
-        u8x8_SetGPIOResult(u8x8, /* get menu select pin state */ 0);
+        u8x8_SetGPIOResult(u8x8, 0);
         break;
+
     case U8X8_MSG_GPIO_MENU_NEXT:
-        u8x8_SetGPIOResult(u8x8, /* get menu next pin state */ 0);
+        u8x8_SetGPIOResult(u8x8, 0);
         break;
+
     case U8X8_MSG_GPIO_MENU_PREV:
-        u8x8_SetGPIOResult(u8x8, /* get menu prev pin state */ 0);
+        u8x8_SetGPIOResult(u8x8, 0);
         break;
+
     case U8X8_MSG_GPIO_MENU_HOME:
-        u8x8_SetGPIOResult(u8x8, /* get menu home pin state */ 0);
+        u8x8_SetGPIOResult(u8x8, 0);
         break;
+
     default:
-        u8x8_SetGPIOResult(u8x8, 1); // default return value
+        u8x8_SetGPIOResult(u8x8, 1);
         break;
     }
+
     return 1;
 }
-void u8g2Init(u8g2_t *u8g2)
+
+/* -------------------------------------------------------------------------- */
+/*                          Public OLED API                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+  * @brief  Initialize the SSD1306 OLED via u8g2
+  * @retval None
+  */
+void OLED_Init(void)
 {
-	u8g2_Setup_ssd1306_i2c_128x64_noname_f(u8g2, U8G2_R0, u8x8_byte_hw_i2c, u8x8_gpio_and_delay); // ??? u8g2 ???
-	u8g2_InitDisplay(u8g2);                                                                       // ??????????????,??????,?????????
-	u8g2_SetPowerSave(u8g2, 0);                                                                   // ?????
-	u8g2_ClearBuffer(u8g2);
+    u8g2_Setup_ssd1306_i2c_128x64_noname_f(&u8g2, U8G2_R0,
+                                            u8x8_byte_hw_i2c, u8x8_gpio_and_delay);
+    u8g2_InitDisplay(&u8g2);
+    u8g2_SetPowerSave(&u8g2, 0);             /* Wake up display */
+    u8g2_SetFont(&u8g2, u8g2_font_6x10_tf);  /* Set 6x10 font (closest to 6x8) */
+    u8g2_ClearBuffer(&u8g2);
+    u8g2_SendBuffer(&u8g2);
 }
 
+/**
+  * @brief  Clear the display buffer (call OLED_Refresh to show)
+  * @retval None
+  */
+void OLED_Clear(void)
+{
+    u8g2_ClearBuffer(&u8g2);
+}
 
+/**
+  * @brief  Draw string at (x, y) in display buffer (call OLED_Refresh to show)
+  * @param  x: pixel X coordinate (0-127)
+  * @param  y: pixel Y coordinate of character baseline
+  * @param  str: null-terminated string
+  * @retval None
+  */
+void OLED_ShowString(uint8_t x, uint8_t y, const char *str)
+{
+    u8g2_DrawStr(&u8g2, x, y, str);
+	
+}
+
+/**
+  * @brief  Send buffer content to physical OLED display
+  * @retval None
+  */
+void OLED_Refresh(void)
+{
+    u8g2_SendBuffer(&u8g2);
+}

@@ -29,7 +29,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,6 +62,7 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
 
 /* USER CODE END 0 */
 
@@ -98,7 +99,6 @@ int main(void)
   MX_I2C1_Init();
   MX_RTC_Init();
   MX_SPI1_Init();
-  MX_SPI2_Init();
   MX_USART6_UART_Init();
   MX_TIM1_Init();
   MX_USART1_UART_Init();

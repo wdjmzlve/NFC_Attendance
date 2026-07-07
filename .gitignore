@@ -84,6 +84,7 @@ desktop.ini
 *.swp
 *.swo
 *~
+*.claude
 
 # 编译输出日志
 *.log
