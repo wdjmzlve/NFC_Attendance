@@ -52,6 +52,8 @@
 #define KEY_UP_PORT       KEY2_GPIO_Port
 #define KEY_DOWN_PIN      KEY3_Pin
 #define KEY_DOWN_PORT     KEY3_GPIO_Port
+#define KEY_SAVE_PIN      KEY4_Pin
+#define KEY_SAVE_PORT     KEY4_GPIO_Port
 
 #define KEY_IS_PRESSED(port, pin)  (HAL_GPIO_ReadPin((port), (pin)) == GPIO_PIN_RESET)
 
@@ -177,7 +179,15 @@ void Task_Display(void *argument)
     uint32_t splash_deadline = osKernelGetTickCount() + SPLASH_DURATION_MS;
 
     /* ---- Clock / card state ---- */
-    BSP_RTC_DateTime_t dt;
+	BSP_RTC_DateTime_t dt = {
+		.year = 2026, .month = 6, .day = 20,
+		.hour = 14, .minute = 30, .second = 0
+	};
+	if (BSP_RTC_IsFirstPowerOn()) {
+    BSP_RTC_MarkInitialized();
+
+	}
+
     CardInfo_t card_info;
     uint32_t card_show_deadline = 0;
     float    temperature = 0.0f;
@@ -185,7 +195,7 @@ void Task_Display(void *argument)
 
     /* ---- Setting mode state ---- */
     SetField_t field = FIELD_YEAR;
-    uint8_t  key_mode_prev = 0, key_up_prev = 0, key_down_prev = 0;
+    uint8_t  key_mode_prev = 0, key_up_prev = 0, key_down_prev = 0, key_save_prev = 0;
     uint32_t key_up_tick    = 0, key_down_tick    = 0;
     uint32_t key_up_repeat  = 0, key_down_repeat  = 0;
     uint8_t  blink_on       = 1;
@@ -203,6 +213,7 @@ void Task_Display(void *argument)
         uint8_t key_mode  = KEY_IS_PRESSED(KEY_MODE_PORT, KEY_MODE_PIN);
         uint8_t key_up    = KEY_IS_PRESSED(KEY_UP_PORT,   KEY_UP_PIN);
         uint8_t key_down  = KEY_IS_PRESSED(KEY_DOWN_PORT, KEY_DOWN_PIN);
+        uint8_t key_save  = KEY_IS_PRESSED(KEY_SAVE_PORT, KEY_SAVE_PIN);
 
         /* ---- Read RTC (skip in setting mode to preserve edits) ---- */
         if (mode != DISP_MODE_SETTING) {
@@ -247,6 +258,16 @@ void Task_Display(void *argument)
                 LED_OFF(LED1_GPIO_Port, LED1_Pin);
                 LED_OFF(LED2_GPIO_Port, LED2_Pin);
                 LED_OFF(LED3_GPIO_Port, LED3_Pin);
+            }
+        }
+
+        /* ---- Key SAVE (KEY4): save & exit in setting mode ---- */
+        if (key_save && !key_save_prev) {
+            if (mode == DISP_MODE_SETTING) {
+                dt.weekday = BSP_RTC_CalcWeekday(dt.year, dt.month, dt.day);
+                BSP_RTC_SetDateTime(&dt);
+                BSP_RTC_MarkInitialized();
+                mode = DISP_MODE_CLOCK;
             }
         }
 
@@ -314,7 +335,7 @@ void Task_Display(void *argument)
             if (mode == DISP_MODE_SETTING) {
                 switch (field) {
                 case FIELD_YEAR:
-                    if (dt.year > 2020U) dt.year--; break;
+                    if (dt.year ) dt.year--; break;
                 case FIELD_MONTH:
                     dt.month = (dt.month == 1U) ? 12U : dt.month - 1U;
                     dt.day = ClampDay(dt.day, dt.year, dt.month);
@@ -339,7 +360,7 @@ void Task_Display(void *argument)
             if (mode == DISP_MODE_SETTING) {
                 switch (field) {
                 case FIELD_YEAR:
-                    if (dt.year > 2020U) dt.year--; break;
+                    if (dt.year ) dt.year--; break;
                 case FIELD_MONTH:
                     dt.month = (dt.month == 1U) ? 12U : dt.month - 1U;
                     dt.day = ClampDay(dt.day, dt.year, dt.month);
@@ -392,6 +413,8 @@ void Task_Display(void *argument)
         if (mode == DISP_MODE_SPLASH) {
             /* Logo on left half: 64x64 native page-format bitmap */
             OLED_DrawBitmap(0, 0, 64, 64, logo);
+            OLED_SetFont(u8g2_font_wqy12_t_gb2312);
+            OLED_DrawUTF8(68, 36,  "姓名:杨城");
 
 
             /* Chinese course name on right side (wqy12, 12px font) */
@@ -401,8 +424,8 @@ void Task_Display(void *argument)
 
             /* Project name in ASCII (6x10 font) */
             OLED_SetFont(u8g2_font_6x10_tf);
-            OLED_ShowString(68, 44, "NFC");
-            OLED_ShowString(68, 54, "Attendance");
+            OLED_ShowString(68, 46, "NFC");
+            OLED_ShowString(68, 56, "Attendance");
 
         } else if (mode == DISP_MODE_CLOCK) {
             OLED_SetFont(u8g2_font_6x10_tf);
@@ -456,7 +479,7 @@ void Task_Display(void *argument)
             snprintf(line_buf, sizeof(line_buf),
                      "Set: %s  +-:adj", field_names[field]);
             OLED_ShowString(0, 44, line_buf);
-            OLED_ShowString(0, 56, "MODE:next/save");
+            OLED_ShowString(0, 56, "KEY4:save MODE:next");
 
         } else if (mode == DISP_MODE_CARD) {
             OLED_SetFont(u8g2_font_6x10_tf);
@@ -510,6 +533,7 @@ void Task_Display(void *argument)
         key_mode_prev  = key_mode;
         key_up_prev    = key_up;
         key_down_prev  = key_down;
+        key_save_prev  = key_save;
 
         osDelay(DISPLAY_PERIOD_MS);
     }
