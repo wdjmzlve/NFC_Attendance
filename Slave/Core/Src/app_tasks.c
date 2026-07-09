@@ -12,6 +12,9 @@
 #include "gui.h"
 #include "ds18b20.h"
 #include "uart_drv.h"
+#include "nfc_storage.h"
+#include "w25q128.h"
+#include "midi.h"
 #include <stdio.h>
 #include <string.h>
 #include "usart.h"
@@ -26,7 +29,6 @@
 #define SPLASH_DURATION_MS      3000U
 #define CARD_DISPLAY_MS         3000U
 #define TEMP_READ_PERIOD_MS     2000U
-#define BEEP_DURATION_MS        80U
 
 /* Key timing (ms) */
 #define KEY_LONG_PRESS_MS       600U
@@ -71,10 +73,12 @@
 /* -------------------------------------------------------------------------- */
 
 typedef enum {
-    DISP_MODE_SPLASH,     /* Boot splash screen (3 sec)                       */
-    DISP_MODE_CLOCK,      /* Clock + temperature standby                      */
-    DISP_MODE_SETTING,    /* Date/time setting via keys                       */
-    DISP_MODE_CARD        /* Card detected info overlay                       */
+    DISP_MODE_SPLASH,        /* Boot splash screen (3 sec)                    */
+    DISP_MODE_CLOCK,         /* Clock + temperature standby                   */
+    DISP_MODE_SETTING,       /* Date/time setting via keys                    */
+    DISP_MODE_CARD,          /* Card detected info + attendance result        */
+    DISP_MODE_ADMIN_INFO,    /* Admin card info display (2 sec)               */
+    DISP_MODE_ADMIN_SETTING  /* Admin config: dev_id + att_mode               */
 } DispMode_t;
 
 typedef enum {
@@ -86,6 +90,32 @@ typedef enum {
     FIELD_SECOND,
     FIELD_COUNT
 } SetField_t;
+
+typedef enum {
+    ADMIN_FIELD_DEV_ID = 0,  /**< Device ID setting field                     */
+    ADMIN_FIELD_ATT_MODE,    /**< Attendance mode setting field               */
+    ADMIN_FIELD_COUNT
+} AdminField_t;
+
+/* -------------------------------------------------------------------------- */
+/*  LED/Buzzer Feedback State Machine (driven by Task_Display each cycle)     */
+/* -------------------------------------------------------------------------- */
+#define FB_LED_GREEN_PIN     LED4_Pin
+#define FB_LED_GREEN_PORT    LED4_GPIO_Port
+#define FB_LED_RED_PIN       LED5_Pin
+#define FB_LED_RED_PORT      LED5_GPIO_Port
+#define FB_LED_YELLOW_PIN    LED6_Pin
+#define FB_LED_YELLOW_PORT   LED6_GPIO_Port
+#define FB_LED_ADMIN_PIN     LED7_Pin
+#define FB_LED_ADMIN_PORT    LED7_GPIO_Port
+
+typedef struct {
+    uint8_t  active;          /**< 1 when feedback sequence is running        */
+    uint8_t  type;            /**< FeedbackEvt_t                              */
+    uint32_t start_tick;      /**< Tick when feedback started                 */
+    uint8_t  phase;           /**< Current phase in multi-phase sequence      */
+    uint32_t phase_deadline;  /**< Tick when current phase ends               */
+} FeedbackState_t;
 
 /* -------------------------------------------------------------------------- */
 /*  Message Queue                                                             */
@@ -106,6 +136,11 @@ static uint8_t card_has_avatar = 0;
 /*  RC522互斥量                                                               */
 /* -------------------------------------------------------------------------- */
 osMutexId_t rc522MutexHandle;
+
+/* -------------------------------------------------------------------------- */
+/*  W25Q128存储互斥量                                                         */
+/* -------------------------------------------------------------------------- */
+osMutexId_t storageMutexHandle;
 
 /* -------------------------------------------------------------------------- */
 /*  图片数据缓存（静态分配，不占用堆）                                          */
@@ -687,8 +722,58 @@ static void Serial_RxCallback(UartDrv_RxData_t *pData, void *pUserCtx)
 
 /* ---- Task_CardRead（修改版） ---- */
 
-/* 向前声明：Beep 实现在本文件后半部分 */
-static void Beep(uint32_t duration_ms);
+
+/* -------------------------------------------------------------------------- */
+/*  Helper: Calculate duration in seconds between two date-times               */
+/* -------------------------------------------------------------------------- */
+/**
+ * @brief  Calculate seconds from last_rec timestamp to now
+ * @param  last_rec: previous attendance record (holds entry time)
+ * @param  now: current RTC date-time
+ * @retval Duration in seconds (handles cross-midnight)
+ */
+static uint32_t calc_duration_sec(const AttendanceRecord_t *last_rec,
+                                   const BSP_RTC_DateTime_t *now)
+{
+    static const uint8_t month_days[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    uint32_t days1 = 0, days2 = 0;
+    uint32_t secs1, secs2;
+    uint16_t y;
+    uint8_t m;
+
+    /* Calculate days since year 2000 for last_rec timestamp */
+    for (y = 2000; y < last_rec->year; y++) {
+        days1 += 365;
+        if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) days1++;
+    }
+    for (m = 1; m < last_rec->month; m++) {
+        days1 += month_days[m - 1];
+        if (m == 2 && ((last_rec->year % 4 == 0 && last_rec->year % 100 != 0)
+                        || (last_rec->year % 400 == 0))) days1++;
+    }
+    days1 += last_rec->day - 1;
+
+    /* Calculate days since year 2000 for now */
+    for (y = 2000; y < now->year; y++) {
+        days2 += 365;
+        if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) days2++;
+    }
+    for (m = 1; m < now->month; m++) {
+        days2 += month_days[m - 1];
+        if (m == 2 && ((now->year % 4 == 0 && now->year % 100 != 0)
+                        || (now->year % 400 == 0))) days2++;
+    }
+    days2 += now->day - 1;
+
+    secs1 = (uint32_t)last_rec->hour * 3600UL
+          + (uint32_t)last_rec->minute * 60UL
+          + (uint32_t)last_rec->second;
+    secs2 = (uint32_t)now->hour * 3600UL
+          + (uint32_t)now->minute * 60UL
+          + (uint32_t)now->second;
+
+    return (days2 - days1) * 86400UL + (secs2 - secs1);
+}
 
 void Task_CardRead(void *argument)
 {
@@ -889,11 +974,124 @@ void Task_CardRead(void *argument)
         osMutexRelease(rc522MutexHandle);
 
         if (status == RC522_OK) {
-            /* 发给显示任务 */
+            /* ================================================================ */
+            /*  Attendance Determination & Record Writing                        */
+            /* ================================================================ */
+            {
+                DeviceConfig_t *cfg = NFC_Storage_GetConfig();
+
+                /* Initialize attendance fields to defaults */
+                card_info.att_event    = ATT_EVENT_ENTRY;
+                card_info.att_status   = ATT_STATUS_NORMAL;
+                card_info.duration_sec = 0;
+                card_info.feedback     = FB_EVT_VALID_ENTRY;
+
+                if (card_info.card_type == CARD_TYPE_ADMIN) {
+                    /* Admin card: no attendance record, just feedback */
+                    card_info.feedback = FB_EVT_ADMIN;
+                } else {
+                    uint8_t last_event;
+                    uint8_t cache_hit;
+                    AttendanceRecord_t last_rec;
+
+                    /* Step 1: LRU cache lookup */
+                    cache_hit = LRU_Lookup(card_info.uid, &last_event);
+
+                    /* Step 2: Cache miss -> scan Flash for last record */
+                    if (!cache_hit) {
+                        if (NFC_Storage_FindLastByUID(card_info.uid, &last_rec)) {
+                            last_event = last_rec.event;
+                            cache_hit = 1;
+                        }
+                    }
+
+                    /* Step 3: Determine event by attendance mode */
+                    if (!cache_hit) {
+                        /* First time this card is seen */
+                        if (cfg->att_mode == ATT_MODE_EXIT) {
+                            card_info.att_event  = ATT_EVENT_EXIT;
+                            card_info.att_status = ATT_STATUS_NO_ENTRY;
+                            card_info.feedback   = FB_EVT_INVALID;
+                        } else {
+                            /* Entry or Both mode: treat as entry */
+                            card_info.att_event  = ATT_EVENT_ENTRY;
+                            card_info.att_status = ATT_STATUS_NORMAL;
+                            card_info.feedback   = FB_EVT_VALID_ENTRY;
+                        }
+                    } else if (cfg->att_mode == ATT_MODE_ENTRY) {
+                        /* Entry-only mode */
+                        if (last_event == ATT_EVENT_ENTRY) {
+                            card_info.att_event  = ATT_EVENT_ENTRY;
+                            card_info.att_status = ATT_STATUS_DUP;
+                            card_info.feedback   = FB_EVT_DUP;
+                        } else {
+                            card_info.att_event  = ATT_EVENT_ENTRY;
+                            card_info.att_status = ATT_STATUS_NORMAL;
+                            card_info.feedback   = FB_EVT_VALID_ENTRY;
+                        }
+                    } else if (cfg->att_mode == ATT_MODE_EXIT) {
+                        /* Exit-only mode */
+                        if (last_event == ATT_EVENT_ENTRY) {
+                            card_info.att_event    = ATT_EVENT_EXIT;
+                            card_info.att_status   = ATT_STATUS_NORMAL;
+                            card_info.feedback     = FB_EVT_VALID_EXIT;
+                            card_info.duration_sec = calc_duration_sec(&last_rec,
+                                                     &card_info.timestamp);
+                        } else {
+                            card_info.att_event  = ATT_EVENT_EXIT;
+                            card_info.att_status = ATT_STATUS_NO_ENTRY;
+                            card_info.feedback   = FB_EVT_INVALID;
+                        }
+                    } else {
+                        /* Both mode (ATT_MODE_BOTH): toggle entry/exit */
+                        if (last_event == ATT_EVENT_ENTRY) {
+                            card_info.att_event    = ATT_EVENT_EXIT;
+                            card_info.att_status   = ATT_STATUS_NORMAL;
+                            card_info.feedback     = FB_EVT_VALID_EXIT;
+                            card_info.duration_sec = calc_duration_sec(&last_rec,
+                                                     &card_info.timestamp);
+                        } else {
+                            card_info.att_event  = ATT_EVENT_ENTRY;
+                            card_info.att_status = ATT_STATUS_NORMAL;
+                            card_info.feedback   = FB_EVT_VALID_ENTRY;
+                        }
+                    }
+
+                    /* Step 4: Create and write attendance record to Flash */
+                    {
+                        AttendanceRecord_t rec;
+                        uint32_t total = NFC_Storage_GetTotalRecords();
+
+                        memset(&rec, 0, sizeof(rec));
+                        rec.seq        = total + 1;
+                        memcpy(rec.uid, card_info.uid, 4);
+                        rec.id_num     = card_info.id_num;
+                        rec.card_type  = card_info.card_type;
+                        rec.year       = card_info.timestamp.year;
+                        rec.month      = card_info.timestamp.month;
+                        rec.day        = card_info.timestamp.day;
+                        rec.hour       = card_info.timestamp.hour;
+                        rec.minute     = card_info.timestamp.minute;
+                        rec.second     = card_info.timestamp.second;
+                        rec.event      = card_info.att_event;
+                        rec.status     = card_info.att_status;
+                        rec.dev_id     = cfg->dev_id;
+                        rec.time_offset = cfg->time_offset;
+                        rec.duration   = card_info.duration_sec;
+
+                        NFC_Storage_AddRecord(&rec);
+                    }
+
+                    /* Step 5: Update LRU cache */
+                    LRU_Update(card_info.uid, card_info.att_event);
+                }
+            }
+
+            /* Send to display task */
             osMessageQueuePut(cardQueueHandle, &card_info, 0, 0);
 
-            /* 蜂鸣反馈 */
-            Beep(BEEP_DURATION_MS);
+            /* Beep feedback */
+            MIDI_Beep(9U, 80U);  /* C5 tone, 80ms */
 						char resp[64];
 						
             snprintf(resp, sizeof(resp),
@@ -977,8 +1175,60 @@ void Task_Serial(void *argument)
         } else if (strncmp(cmd, "CLEAR:", 6) == 0) {
             cmd_clear(cmd + 6);
 
+        } else if (strncmp(cmd, "LIST:", 5) == 0) {
+            /* LIST command: LIST:ALL or LIST:N (return last N records) */
+            {
+                uint32_t total = NFC_Storage_GetTotalRecords();
+                uint32_t count;
+                uint32_t start_idx;
+                uint32_t i;
+                AttendanceRecord_t rec;
+                char line[128];
+
+                if (strcmp(cmd + 5, "ALL") == 0) {
+                    count = total;
+                } else {
+                    count = 0;
+                    const char *p = cmd + 5;
+                    while (*p >= '0' && *p <= '9') {
+                        count = count * 10U + (uint32_t)(*p - '0');
+                        p++;
+                    }
+                    if (count > total) count = total;
+                }
+
+                if (count > total) count = total;
+                if (count > 0) start_idx = total - count;
+                else start_idx = 0;
+
+                /* Send total count header */
+                snprintf(line, sizeof(line), "NR=%lu\n", (unsigned long)count);
+                send_response(line);
+
+                for (i = 0; i < count; i++) {
+                    if (NFC_Storage_GetRecord(start_idx + i, &rec)) {
+                        snprintf(line, sizeof(line),
+                            "SEQ=%lu,UID=%02X%02X%02X%02X,SID=%lu,"
+                            "EVT=%c,STS=%c,DT=%04u-%02u-%02u %02u:%02u:%02u,"
+                            "DUR=%lu\n",
+                            (unsigned long)rec.seq,
+                            rec.uid[0], rec.uid[1], rec.uid[2], rec.uid[3],
+                            (unsigned long)rec.id_num,
+                            (rec.event == ATT_EVENT_ENTRY) ? 'E' : 'X',
+                            (rec.status == ATT_STATUS_NORMAL) ? 'N' :
+                            (rec.status == ATT_STATUS_DUP) ? 'D' :
+                            (rec.status == ATT_STATUS_NO_ENTRY) ? 'E' : 'U',
+                            rec.year, rec.month, rec.day,
+                            rec.hour, rec.minute, rec.second,
+                            (unsigned long)rec.duration);
+                        send_response(line);
+                    }
+                }
+                send_response("OK\n");
+            }
+
         } else {
-            /* 未知指令 */
+            /* Unknown command */
             send_response("ERR\n");
         }
     }
@@ -1081,14 +1331,6 @@ void Task_KeyScan(void *argument)
     }
 }
 
-/*  Helper: Short Beep                                                        */
-/* -------------------------------------------------------------------------- */
-static void Beep(uint32_t duration_ms)
-{
-    HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_SET);
-    osDelay(duration_ms);
-    HAL_GPIO_WritePin(BEEP_GPIO_Port, BEEP_Pin, GPIO_PIN_RESET);
-}
 
 /* -------------------------------------------------------------------------- */
 /*  Helper: Blink-field String Builder                                        */
@@ -1155,6 +1397,10 @@ void Task_Display(void *argument)
     LED_OFF(LED1_GPIO_Port, LED1_Pin);
     LED_OFF(LED2_GPIO_Port, LED2_Pin);
     LED_OFF(LED3_GPIO_Port, LED3_Pin);
+    LED_OFF(LED4_GPIO_Port, LED4_Pin);
+    LED_OFF(LED5_GPIO_Port, LED5_Pin);
+    LED_OFF(LED6_GPIO_Port, LED6_Pin);
+    LED_OFF(LED7_GPIO_Port, LED7_Pin);
 
     /* ---- Splash mode state ---- */
     DispMode_t mode = DISP_MODE_SPLASH;
@@ -1183,6 +1429,22 @@ void Task_Display(void *argument)
     uint32_t card_enter_tick    = 0;
     uint8_t  card_disp_is_image = 0;
 
+    /* ---- Attendance result tracking for card display page ---- */
+    uint8_t  card_att_event     = ATT_EVENT_ENTRY;
+    uint8_t  card_att_status    = ATT_STATUS_NORMAL;
+    uint32_t card_duration_sec  = 0;
+
+    /* ---- Admin mode state ---- */
+    AdminField_t admin_field   = ADMIN_FIELD_DEV_ID;
+    uint8_t      admin_blink   = 1;
+    uint32_t     admin_enter_tick = 0;
+    uint16_t     admin_dev_id;
+    uint8_t      admin_att_mode;
+
+    /* ---- LED/Buzzer feedback state machine ---- */
+    FeedbackState_t fb_state;
+    memset(&fb_state, 0, sizeof(fb_state));
+
     /* ---- Key event from Task_KeyScan via queue ---- */
     KeyMsg_t key_msg;
 
@@ -1194,13 +1456,15 @@ void Task_Display(void *argument)
     for (;;) {
         uint32_t now = osKernelGetTickCount();
 
+        /* Service MIDI music sequencer (non-blocking, returns immediately if idle) */
+        MIDI_Tick();
+
         /* ---- Process key events from Task_KeyScan via IPC queue ---- */
         while (osMessageQueueGet(keyQueueHandle, &key_msg, NULL, 0) == osOK) {
             if (key_msg.key_id == KEY_ID_MODE) {
                 /* MODE key: enter setting / cycle field / exit card mode */
                 if (mode == DISP_MODE_CLOCK) {
                     BSP_RTC_GetDateTime(&dt);
-                    dt.second = 0;
                     mode  = DISP_MODE_SETTING;
                     field = FIELD_YEAR;
                     blink_on = 1;
@@ -1209,7 +1473,6 @@ void Task_Display(void *argument)
                     field = (SetField_t)((uint8_t)field + 1U);
                     if (field >= FIELD_COUNT) {
                         dt.weekday = BSP_RTC_CalcWeekday(dt.year, dt.month, dt.day);
-                        dt.second = 0;
                         BSP_RTC_SetDateTime(&dt);
                         BSP_RTC_MarkInitialized();
                         mode = DISP_MODE_CLOCK;
@@ -1221,15 +1484,55 @@ void Task_Display(void *argument)
                     LED_OFF(LED1_GPIO_Port, LED1_Pin);
                     LED_OFF(LED2_GPIO_Port, LED2_Pin);
                     LED_OFF(LED3_GPIO_Port, LED3_Pin);
+                    LED_OFF(LED4_GPIO_Port, LED4_Pin);
+                    LED_OFF(LED5_GPIO_Port, LED5_Pin);
+                    LED_OFF(LED6_GPIO_Port, LED6_Pin);
+                    LED_OFF(LED7_GPIO_Port, LED7_Pin);
+                    fb_state.active = 0;
+                } else if (mode == DISP_MODE_ADMIN_INFO) {
+                    /* Skip to admin setting */
+                    mode = DISP_MODE_ADMIN_SETTING;
+                    admin_blink = 1;
+                    /* admin blink tick updated */
+                } else if (mode == DISP_MODE_ADMIN_SETTING) {
+                    /* Cycle admin field */
+                    admin_field = (AdminField_t)((uint8_t)admin_field + 1U);
+                    if (admin_field >= ADMIN_FIELD_COUNT) {
+                        admin_field = ADMIN_FIELD_DEV_ID;
+                    }
+                    admin_blink = 1;
+                    /* admin blink tick updated */
                 }
             } else if (key_msg.key_id == KEY_ID_SAVE) {
-                /* SAVE key: save & exit setting mode immediately */
+                /* SAVE key: save & exit setting / admin mode */
                 if (mode == DISP_MODE_SETTING) {
                     dt.weekday = BSP_RTC_CalcWeekday(dt.year, dt.month, dt.day);
-                    dt.second = 0;
                     BSP_RTC_SetDateTime(&dt);
                     BSP_RTC_MarkInitialized();
                     mode = DISP_MODE_CLOCK;
+                } else if (mode == DISP_MODE_ADMIN_SETTING) {
+                    /* Save config to Flash */
+                    DeviceConfig_t save_cfg;
+                    memset(&save_cfg, 0, sizeof(save_cfg));
+                    save_cfg.magic[0] = 'N';
+                    save_cfg.magic[1] = 'F';
+                    save_cfg.magic[2] = 'C';
+                    save_cfg.magic[3] = 'A';
+                    save_cfg.dev_id      = admin_dev_id;
+                    save_cfg.att_mode    = admin_att_mode;
+                    save_cfg.time_offset = 0;
+                    NFC_Storage_SaveConfig(&save_cfg);
+                    /* Clear LRU on mode change */
+                    LRU_Clear();
+                    mode = DISP_MODE_CLOCK;
+                    LED_OFF(LED1_GPIO_Port, LED1_Pin);
+                    LED_OFF(LED2_GPIO_Port, LED2_Pin);
+                    LED_OFF(LED3_GPIO_Port, LED3_Pin);
+                    LED_OFF(LED4_GPIO_Port, LED4_Pin);
+                    LED_OFF(LED5_GPIO_Port, LED5_Pin);
+                    LED_OFF(LED6_GPIO_Port, LED6_Pin);
+                    LED_OFF(LED7_GPIO_Port, LED7_Pin);
+                    fb_state.active = 0;
                 }
             } else if (key_msg.key_id == KEY_ID_UP) {
                 /* UP key: increment selected field (short + long press) */
@@ -1252,6 +1555,12 @@ void Task_Display(void *argument)
                         dt.second = (dt.second + 1U) % 60U; break;
                     default: break;
                     }
+                } else if (mode == DISP_MODE_ADMIN_SETTING) {
+                    if (admin_field == ADMIN_FIELD_DEV_ID) {
+                        if (admin_dev_id < 65535U) admin_dev_id++;
+                    } else {
+                        admin_att_mode = (admin_att_mode + 1U) % 3U;
+                    }
                 }
             } else if (key_msg.key_id == KEY_ID_DOWN) {
                 /* DOWN key: decrement selected field (short + long press) */
@@ -1273,6 +1582,12 @@ void Task_Display(void *argument)
                     case FIELD_SECOND:
                         dt.second = (dt.second == 0U) ? 59U : dt.second - 1U; break;
                     default: break;
+                    }
+                } else if (mode == DISP_MODE_ADMIN_SETTING) {
+                    if (admin_field == ADMIN_FIELD_DEV_ID) {
+                        if (admin_dev_id > 1U) admin_dev_id--;
+                    } else {
+                        admin_att_mode = (admin_att_mode == 0U) ? 2U : admin_att_mode - 1U;
                     }
                 }
             }
@@ -1297,10 +1612,35 @@ void Task_Display(void *argument)
             }
         }
 
-        /* ---- Blink timer for setting mode cursor ---- */
+        /* ---- Blink timer for setting mode + admin setting cursor ---- */
         if (now - last_blink_tick >= BLINK_PERIOD_MS) {
             blink_on = !blink_on;
             last_blink_tick = now;
+            if (mode == DISP_MODE_ADMIN_SETTING) {
+                admin_blink = !admin_blink;
+            }
+        }
+
+        /* ---- Admin mode 120s timeout ---- */
+        if ((mode == DISP_MODE_ADMIN_INFO || mode == DISP_MODE_ADMIN_SETTING)
+            && (int32_t)(now - admin_enter_tick) >= 120000) {
+            mode = DISP_MODE_CLOCK;
+            LED_OFF(LED1_GPIO_Port, LED1_Pin);
+            LED_OFF(LED2_GPIO_Port, LED2_Pin);
+            LED_OFF(LED3_GPIO_Port, LED3_Pin);
+            LED_OFF(LED4_GPIO_Port, LED4_Pin);
+            LED_OFF(LED5_GPIO_Port, LED5_Pin);
+            LED_OFF(LED6_GPIO_Port, LED6_Pin);
+            LED_OFF(LED7_GPIO_Port, LED7_Pin);
+            fb_state.active = 0;
+        }
+
+        /* ---- Admin info -> Admin setting auto transition (2s) ---- */
+        if (mode == DISP_MODE_ADMIN_INFO
+            && (int32_t)(now - admin_enter_tick) >= 2000) {
+            mode = DISP_MODE_ADMIN_SETTING;
+            admin_blink = 1;
+            /* admin blink tick updated */
         }
 
         /* ---- Check card queue (non-blocking) ---- */
@@ -1313,25 +1653,140 @@ void Task_Display(void *argument)
                     LED_OFF(LED1_GPIO_Port, LED1_Pin);
                     LED_OFF(LED2_GPIO_Port, LED2_Pin);
                     LED_OFF(LED3_GPIO_Port, LED3_Pin);
+                    LED_OFF(LED4_GPIO_Port, LED4_Pin);
+                    LED_OFF(LED5_GPIO_Port, LED5_Pin);
+                    LED_OFF(LED6_GPIO_Port, LED6_Pin);
+                    LED_OFF(LED7_GPIO_Port, LED7_Pin);
+                    fb_state.active = 0;
                 }
+                /* Admin modes persist until timeout or save */
             } else {
-                mode = DISP_MODE_CARD;
+                /* Save attendance info for card display page */
+                card_att_event    = card_info.att_event;
+                card_att_status   = card_info.att_status;
+                card_duration_sec = card_info.duration_sec;
 
-                /* Record entry time for avatar delay (2s) */
-                card_enter_tick    = now;
-                card_disp_is_image = (card_info.card_type == CARD_TYPE_IMAGE);
+                /* Admin card: enter admin mode (or refresh timeout) */
+                if (card_info.card_type == CARD_TYPE_ADMIN) {
+                    if (mode == DISP_MODE_ADMIN_INFO
+                        || mode == DISP_MODE_ADMIN_SETTING) {
+                        /* Already in admin mode, refresh timeout */
+                        admin_enter_tick = now;
+                    } else {
+                        mode = DISP_MODE_ADMIN_INFO;
+                        admin_enter_tick = now;
+                        /* Load current config for editing */
+                        {
+                            DeviceConfig_t *cfg = NFC_Storage_GetConfig();
+                            admin_dev_id   = cfg->dev_id;
+                            admin_att_mode = cfg->att_mode;
+                        }
+                        admin_field = ADMIN_FIELD_DEV_ID;
+                        admin_blink = 1;
+                        /* admin blink tick updated */
 
-                /* Update card status LEDs */
-                LED_ON(LED1_GPIO_Port, LED1_Pin);
-                if (card_info.card_type == CARD_TYPE_NORMAL) {
-                    LED_ON(LED2_GPIO_Port, LED2_Pin);
-                    LED_OFF(LED3_GPIO_Port, LED3_Pin);
-                } else if (card_info.card_type == CARD_TYPE_IMAGE) {
-                    LED_OFF(LED2_GPIO_Port, LED2_Pin);
-                    LED_ON(LED3_GPIO_Port, LED3_Pin);
+                        /* Trigger admin LED feedback */
+                        fb_state.active   = 1;
+                        fb_state.type     = FB_EVT_ADMIN;
+                        fb_state.phase    = 0;
+                        fb_state.start_tick    = now;
+                        fb_state.phase_deadline = now + 300;
+                        MIDI_Beep(9U, 250U);  /* C5 high tone, 250ms */
+                    }
+                } else if (mode == DISP_MODE_ADMIN_INFO
+                           || mode == DISP_MODE_ADMIN_SETTING) {
+                    /* Normal card during admin mode: reject with beep */
+                    MIDI_Beep(1U, 50U);  /* C4 low tone, 50ms */
+                    /* Don't change display, stay in admin mode */
                 } else {
-                    LED_OFF(LED2_GPIO_Port, LED2_Pin);
-                    LED_OFF(LED3_GPIO_Port, LED3_Pin);
+                    mode = DISP_MODE_CARD;
+
+                    /* Card type LED indication: LED1=present, LED2=normal, LED3=image */
+                    LED_ON(LED1_GPIO_Port, LED1_Pin);
+                    if (card_info.card_type == CARD_TYPE_NORMAL) {
+                        LED_ON(LED2_GPIO_Port, LED2_Pin);
+                        LED_OFF(LED3_GPIO_Port, LED3_Pin);
+                    } else if (card_info.card_type == CARD_TYPE_IMAGE) {
+                        LED_OFF(LED2_GPIO_Port, LED2_Pin);
+                        LED_ON(LED3_GPIO_Port, LED3_Pin);
+                    }
+
+                    /* Record entry time for avatar delay (2s) */
+                    card_enter_tick    = now;
+                    card_disp_is_image = (card_info.card_type == CARD_TYPE_IMAGE);
+
+                    /* Trigger LED/buzzer feedback based on attendance result */
+                    fb_state.active   = 1;
+                    fb_state.type     = card_info.feedback;
+                    fb_state.phase    = 0;
+                    fb_state.start_tick    = now;
+
+                    /* Set initial phase deadline based on feedback type */
+                    if (card_info.feedback == FB_EVT_INVALID) {
+                        /* Invalid: red blink 2x100ms + beep 2x100ms */
+                        fb_state.phase_deadline = now + 100;
+                        MIDI_Beep(1U, 100U);  /* C4 low tone, 100ms */
+                    } else if (card_info.feedback == FB_EVT_DUP) {
+                        /* Duplicate: yellow 50ms + short beep */
+                        fb_state.phase_deadline = now + 50;
+                        MIDI_Beep(5U, 50U);  /* G4 mid tone, 50ms */
+                    } else {
+                        /* Valid entry/exit: green 150ms + beep 100ms */
+                        fb_state.phase_deadline = now + 150;
+                        MIDI_Beep(9U, 100U);  /* C5 high tone, 100ms */
+                    }
+                }
+            }
+        }
+
+        /* ---- LED feedback state machine (50ms tick) ---- */
+        if (fb_state.active) {
+            if (fb_state.phase == 0) {
+                /* Phase 0: turn on LEDs (first run since activation) */
+                switch (fb_state.type) {
+                case FB_EVT_VALID_ENTRY:
+                case FB_EVT_VALID_EXIT:
+                    LED_ON(FB_LED_GREEN_PORT, FB_LED_GREEN_PIN);
+                    break;
+                case FB_EVT_INVALID:
+                    LED_ON(FB_LED_RED_PORT, FB_LED_RED_PIN);
+                    break;
+                case FB_EVT_DUP:
+                    LED_ON(FB_LED_YELLOW_PORT, FB_LED_YELLOW_PIN);
+                    break;
+                case FB_EVT_ADMIN:
+                    LED_ON(FB_LED_ADMIN_PORT, FB_LED_ADMIN_PIN);
+                    break;
+                default:
+                    break;
+                }
+                fb_state.phase = 1;
+            } else if ((int32_t)(now - fb_state.phase_deadline) >= 0) {
+                /* Deadline reached, advance to next phase */
+                fb_state.phase++;
+                if (fb_state.type == FB_EVT_INVALID) {
+                    /* Invalid: red blink 2x (100ms on, 100ms off, 100ms on, 100ms off) */
+                    if (fb_state.phase == 2) {
+                        /* First blink off */
+                        LED_OFF(FB_LED_RED_PORT, FB_LED_RED_PIN);
+                        fb_state.phase_deadline = now + 100;
+                    } else if (fb_state.phase == 3) {
+                        /* Second blink on */
+                        LED_ON(FB_LED_RED_PORT, FB_LED_RED_PIN);
+                        MIDI_Beep(1U, 100U);  /* C4 low tone, 100ms */
+                        fb_state.phase_deadline = now + 100;
+                    } else if (fb_state.phase == 4) {
+                        /* Second blink off - done */
+                        LED_OFF(FB_LED_RED_PORT, FB_LED_RED_PIN);
+                        fb_state.active = 0;
+                    }
+                } else {
+                    /* Single on/off: turn off and done */
+                    LED_OFF(FB_LED_GREEN_PORT, FB_LED_GREEN_PIN);
+                    LED_OFF(FB_LED_RED_PORT, FB_LED_RED_PIN);
+                    LED_OFF(FB_LED_YELLOW_PORT, FB_LED_YELLOW_PIN);
+                    LED_OFF(FB_LED_ADMIN_PORT, FB_LED_ADMIN_PIN);
+                    fb_state.active = 0;
                 }
             }
         }
@@ -1410,6 +1865,48 @@ void Task_Display(void *argument)
             OLED_ShowString(0, 44, line_buf);
             OLED_ShowString(0, 56, "KEY4:save MODE:next");
 
+        } else if (mode == DISP_MODE_ADMIN_INFO) {
+            /* ---- Admin card info page (2 sec) ---- */
+            OLED_SetFont(u8g2_font_6x10_tf);
+            OLED_ShowString(0, 8, "=== ADMIN CARD ===");
+            snprintf(line_buf, sizeof(line_buf),
+                     "ID: %lu", (unsigned long)card_info.id_num);
+            OLED_ShowString(0, 22, line_buf);
+            snprintf(line_buf, sizeof(line_buf),
+                     "UID:%02X%02X%02X%02X",
+                     card_info.uid[0], card_info.uid[1],
+                     card_info.uid[2], card_info.uid[3]);
+            OLED_ShowString(0, 36, line_buf);
+            OLED_ShowString(0, 52, "Entering setup...");
+
+        } else if (mode == DISP_MODE_ADMIN_SETTING) {
+            /* ---- Admin setting page: dev_id + att_mode ---- */
+            const char *mode_names[] = {"Entry", "Exit", "Both"};
+            OLED_SetFont(u8g2_font_6x10_tf);
+            OLED_ShowString(0, 8, "=== ADMIN SETTING ===");
+
+            /* Device ID */
+            snprintf(line_buf, sizeof(line_buf), "Dev ID: %-5u",
+                     (unsigned int)admin_dev_id);
+            if (admin_field == ADMIN_FIELD_DEV_ID && admin_blink) {
+                /* Blink selected field: show with brackets */
+                snprintf(line_buf, sizeof(line_buf), "Dev ID:[%-5u]",
+                         (unsigned int)admin_dev_id);
+            }
+            OLED_ShowString(0, 22, line_buf);
+
+            /* Attendance mode */
+            snprintf(line_buf, sizeof(line_buf), "Mode: %s",
+                     (admin_att_mode < 3) ? mode_names[admin_att_mode] : "?");
+            if (admin_field == ADMIN_FIELD_ATT_MODE && admin_blink) {
+                snprintf(line_buf, sizeof(line_buf), "Mode:[%s]",
+                         (admin_att_mode < 3) ? mode_names[admin_att_mode] : "?");
+            }
+            OLED_ShowString(0, 36, line_buf);
+
+            OLED_ShowString(0, 52, "UP/DN:adj MODE:next");
+            OLED_ShowString(0, 62, "KEY4:save 120s timeout");
+
         } else if (mode == DISP_MODE_CARD) {
             /*
              * For image cards, show avatar page after a 2-second delay.
@@ -1432,6 +1929,36 @@ void Task_Display(void *argument)
                 snprintf(line_buf, sizeof(line_buf),
                          "ID:%lu", (unsigned long)card_info.id_num);
                 OLED_ShowString(56, 36, line_buf);
+
+                /* Attendance result on avatar page */
+                {
+                    const char *evt_str;
+                    evt_str = (card_att_event == ATT_EVENT_ENTRY) ? "In" : "Out";
+                    if (card_att_status == ATT_STATUS_NORMAL) {
+                        snprintf(line_buf, sizeof(line_buf), "%s OK", evt_str);
+                    } else if (card_att_status == ATT_STATUS_DUP) {
+                        snprintf(line_buf, sizeof(line_buf), "%s DUP", evt_str);
+                    } else {
+                        snprintf(line_buf, sizeof(line_buf), "%s ERR", evt_str);
+                    }
+                    OLED_ShowString(56, 48, line_buf);
+
+                    if (card_att_event == ATT_EVENT_EXIT
+                        && card_att_status == ATT_STATUS_NORMAL
+                        && card_duration_sec > 0) {
+                        uint32_t h, m;
+                        h = card_duration_sec / 3600U;
+                        m = (card_duration_sec % 3600U) / 60U;
+                        if (h > 0) {
+                            snprintf(line_buf, sizeof(line_buf),
+                                     "%luh%lum", (unsigned long)h, (unsigned long)m);
+                        } else {
+                            snprintf(line_buf, sizeof(line_buf),
+                                     "%lum", (unsigned long)m);
+                        }
+                        OLED_ShowString(56, 58, line_buf);
+                    }
+                }
             } else {
                 /* ---- Normal Card Info Page ---- */
                 OLED_SetFont(u8g2_font_6x10_tf);
@@ -1463,16 +1990,51 @@ void Task_Display(void *argument)
                                     card_sector_bmp);
                 }
 
-                /* Swipe timestamp */
-                snprintf(line_buf, sizeof(line_buf),
-                         "%04u-%02u-%02u %02u:%02u:%02u",
-                         card_info.timestamp.year,
-                         card_info.timestamp.month,
-                         card_info.timestamp.day,
-                         card_info.timestamp.hour,
-                         card_info.timestamp.minute,
-                         card_info.timestamp.second);
-                OLED_ShowString(0, 60, line_buf);
+                /* Swipe timestamp + attendance result */
+                {
+                    const char *evt_str;
+                    const char *sts_str;
+
+                    evt_str = (card_att_event == ATT_EVENT_ENTRY) ? "In " : "Out";
+                    if (card_att_status == ATT_STATUS_NORMAL) {
+                        sts_str = "OK";
+                    } else if (card_att_status == ATT_STATUS_DUP) {
+                        sts_str = "DUP";
+                    } else if (card_att_status == ATT_STATUS_NO_ENTRY) {
+                        sts_str = "NOIN";
+                    } else {
+                        sts_str = "UNK";
+                    }
+
+                    snprintf(line_buf, sizeof(line_buf),
+                             "%s %s %02u:%02u:%02u",
+                             evt_str, sts_str,
+                             card_info.timestamp.hour,
+                             card_info.timestamp.minute,
+                             card_info.timestamp.second);
+                    OLED_ShowString(0, 60, line_buf);
+
+                    /* Show duration for exit events */
+                    if (card_att_event == ATT_EVENT_EXIT
+                        && card_att_status == ATT_STATUS_NORMAL
+                        && card_duration_sec > 0) {
+                        uint32_t h, m, s;
+                        h = card_duration_sec / 3600U;
+                        m = (card_duration_sec % 3600U) / 60U;
+                        s = card_duration_sec % 60U;
+                        if (h > 0) {
+                            snprintf(line_buf, sizeof(line_buf),
+                                     "%luh%lum", (unsigned long)h, (unsigned long)m);
+                        } else if (m > 0) {
+                            snprintf(line_buf, sizeof(line_buf),
+                                     "%lum%lus", (unsigned long)m, (unsigned long)s);
+                        } else {
+                            snprintf(line_buf, sizeof(line_buf),
+                                     "%lus", (unsigned long)s);
+                        }
+                        OLED_ShowString(80, 60, line_buf);
+                    }
+                }
 
 //              OLED_ShowString(0, 56, "MODE: back to clock");
             }

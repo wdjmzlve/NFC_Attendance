@@ -28,6 +28,10 @@
 #include "oled.h"
 #include "rc522.h"
 #include "app_tasks.h"
+#include "nfc_storage.h"
+#include "w25q128.h"
+#include "midi.h"
+#include "tim.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -80,6 +84,8 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN RTOS_MUTEX */
   /* RC522 mutex: shared between CardRead and Serial tasks */
   rc522MutexHandle = osMutexNew(NULL);
+  /* W25Q128 storage mutex: shared between CardRead (write) and Serial (LIST) */
+  storageMutexHandle = osMutexNew(NULL);
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -160,6 +166,14 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+
+  /* Initialize W25Q128 Flash and NFC Storage subsystem */
+  W25QXX_Init();
+  NFC_Storage_Init();
+
+  /* Initialize MIDI buzzer driver (TIM3 CH1 → PB4 PWM) */
+  MIDI_Init(&htim3, TIM_CHANNEL_1);
+  MIDI_SetVolume(80U);
 
   /* Hardware initialization now handled by Task_Display and Task_CardRead.
    * This default task is kept idle to preserve the CubeMX task framework. */

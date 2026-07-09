@@ -15,6 +15,7 @@ extern "C" {
 #include "main.h"
 #include "cmsis_os.h"
 #include "bsp_rtc.h"
+#include "nfc_storage.h"
 
 /* -------------------------------------------------------------------------- */
 /*  Card Type Constants                                                        */
@@ -39,6 +40,10 @@ typedef struct {
     uint32_t id_num;              /**< Student ID number (from block1 bytes 4-7) */
     uint8_t  card_type;           /**< Card type (CARD_TYPE_NORMAL/_IMAGE)  */
     BSP_RTC_DateTime_t timestamp; /**< Timestamp when card was detected     */
+    uint8_t  att_event;           /**< ATT_EVENT_ENTRY / ATT_EVENT_EXIT     */
+    uint8_t  att_status;          /**< ATT_STATUS_NORMAL/DUP/NO_ENTRY/UNKNOWN */
+    uint32_t duration_sec;        /**< Duration in seconds (exit events)    */
+    uint8_t  feedback;            /**< FeedbackEvt_t for LED/buzzer control */
 } CardInfo_t;
 
 /* -------------------------------------------------------------------------- */
@@ -80,6 +85,9 @@ extern osSemaphoreId_t s_cmdSem;
 
 /** Mutex for RC522 access arbitration (CardRead task vs Serial task) */
 extern osMutexId_t rc522MutexHandle;
+
+/** Mutex for W25Q128 Flash storage access (CardRead vs Serial LIST) */
+extern osMutexId_t storageMutexHandle;
 
 /* -------------------------------------------------------------------------- */
 /*  Task Function Prototypes                                                  */

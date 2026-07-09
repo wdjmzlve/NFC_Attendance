@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include "rc522.h"
 #include "app_tasks.h"
+#include "midi.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -103,6 +104,7 @@ int main(void)
   MX_TIM1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  MX_TIM3_Init();
   Serial_Cmd_Init();
   /* USER CODE END 2 */
 
@@ -194,7 +196,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-
+  MIDI_TimerCallback(htim);
   /* USER CODE END Callback 1 */
 }
 

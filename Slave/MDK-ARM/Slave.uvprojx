@@ -396,6 +396,11 @@
               <FilePath>../Core/Src/app_tasks.c</FilePath>
             </File>
             <File>
+              <FileName>nfc_storage.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/nfc_storage.c</FilePath>
+            </File>
+            <File>
               <FileName>main.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/main.c</FilePath>
