@@ -30,6 +30,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include "rc522.h"
+#include "app_tasks.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -102,7 +103,7 @@ int main(void)
   MX_TIM1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-//	RC522_Platform_Init();
+  Serial_Cmd_Init();
   /* USER CODE END 2 */
 
   /* Init scheduler */

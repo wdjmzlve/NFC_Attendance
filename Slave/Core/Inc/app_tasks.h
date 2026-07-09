@@ -23,6 +23,12 @@ extern "C" {
 #define CARD_TYPE_IMAGE     0x01U   /**< Image/photo NFC card               */
 #define CARD_TYPE_ADMIN     0x02U   /**< Admin NFC card                     */
 
+/* Image data block counts (M1 card: 16 bytes per block, 3 data blocks per sector) */
+#define IMG_BLOCK_SIZE      16U     /**< Bytes per M1 card data block        */
+#define IMG_AVATAR_BLOCKS   24U     /**< Avatar:  sectors 1~8  (8x3 blocks)  */
+#define IMG_NAME_BLOCKS     10U     /**< Name:    sectors 9~12 (3+3+3+1)    */
+#define IMG_DEPT_BLOCKS     10U     /**< Dept:    sectors 12~15 (2+3+3+2)   */
+
 /* -------------------------------------------------------------------------- */
 /*  Card Info Structure                                                       */
 /* -------------------------------------------------------------------------- */
@@ -36,11 +42,38 @@ typedef struct {
 } CardInfo_t;
 
 /* -------------------------------------------------------------------------- */
+/*  Key Event Types (IPC between KeyScan and Display tasks)                    */
+/* -------------------------------------------------------------------------- */
+
+/** Key event type: short press (falling edge) or long press (auto-repeat) */
+typedef enum {
+    KEY_EVT_SHORT = 0,  /**< Short press detected on falling edge         */
+    KEY_EVT_LONG  = 1,  /**< Long press auto-repeat (every KEY_REPEAT_MS) */
+} KeyEvtType_t;
+
+/** Physical key identifiers */
+typedef enum {
+    KEY_ID_MODE = 0,    /**< MODE key: cycle field / enter-exit modes     */
+    KEY_ID_UP,          /**< UP key: increment selected field             */
+    KEY_ID_DOWN,        /**< DOWN key: decrement selected field           */
+    KEY_ID_SAVE,        /**< SAVE key: save & exit setting mode           */
+} KeyId_t;
+
+/** Key event message sent from Task_KeyScan to Task_Display via queue */
+typedef struct {
+    KeyId_t      key_id;   /**< Which physical key generated the event    */
+    KeyEvtType_t evt_type; /**< Short press or long-press repeat          */
+} KeyMsg_t;
+
+/* -------------------------------------------------------------------------- */
 /*  Queue Handles (defined in app_tasks.c)                                    */
 /* -------------------------------------------------------------------------- */
 
 /** Message queue for passing CardInfo_t from CardRead to Display task */
 extern osMessageQueueId_t cardQueueHandle;
+
+/** Message queue for passing KeyMsg_t from KeyScan to Display task */
+extern osMessageQueueId_t keyQueueHandle;
 
 /* -------------------------------------------------------------------------- */
 /*  Task Function Prototypes                                                  */
@@ -62,6 +95,21 @@ void Task_Display(void *argument);
  *          task via cardQueueHandle on detection.
  */
 void Task_CardRead(void *argument);
+
+/**
+ * @brief  Key scanning task: polls GPIO keys, detects short/long press events,
+ *         and sends KeyMsg_t to Display task via keyQueueHandle.
+ * @param  argument: unused
+ * @note   Polls at 20ms intervals. Short press detected on falling edge.
+ *         Long press triggers after KEY_LONG_PRESS_MS, then repeats every KEY_REPEAT_MS.
+ */
+void Task_KeyScan(void *argument);
+
+/**
+ * @brief  Serial command interface initialization (USART1 RX ISR + semaphore)
+ */
+void Serial_Cmd_Init(void);
+
 
 #ifdef __cplusplus
 }

@@ -92,6 +92,8 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN RTOS_QUEUES */
   /* Card info queue: CardRead task -> Display task */
   cardQueueHandle = osMessageQueueNew(4, sizeof(CardInfo_t), NULL);
+  /* Key event queue: KeyScan task -> Display task */
+  keyQueueHandle  = osMessageQueueNew(8, sizeof(KeyMsg_t), NULL);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -107,6 +109,16 @@ void MX_FREERTOS_Init(void) {
           .priority = osPriorityNormal,
       };
       osThreadNew(Task_Display, NULL, &displayTask_attr);
+  }
+
+  /* Key scan task: polls GPIO keys, sends KeyMsg_t to Display task via queue */
+  {
+      static const osThreadAttr_t keyScanTask_attr = {
+          .name = "Task_KeyScan",
+          .stack_size = 128 * 4,
+          .priority = osPriorityNormal,
+      };
+      osThreadNew(Task_KeyScan, NULL, &keyScanTask_attr);
   }
 
   /* Card read task: RC522 polling */
