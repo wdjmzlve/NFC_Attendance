@@ -75,6 +75,12 @@ extern osMessageQueueId_t cardQueueHandle;
 /** Message queue for passing KeyMsg_t from KeyScan to Display task */
 extern osMessageQueueId_t keyQueueHandle;
 
+/** Semaphore for serial command ready notification (ISR -> Task_Serial) */
+extern osSemaphoreId_t s_cmdSem;
+
+/** Mutex for RC522 access arbitration (CardRead task vs Serial task) */
+extern osMutexId_t rc522MutexHandle;
+
 /* -------------------------------------------------------------------------- */
 /*  Task Function Prototypes                                                  */
 /* -------------------------------------------------------------------------- */
@@ -109,6 +115,13 @@ void Task_KeyScan(void *argument);
  * @brief  Serial command interface initialization (USART1 RX ISR + semaphore)
  */
 void Serial_Cmd_Init(void);
+
+/**
+ * @brief  Serial command processing task: waits for command lines from ISR,
+ *         dispatches to cmd_issue / cmd_read / cmd_clear / cmd_img_cache / cmd_update_img.
+ * @param  argument: unused
+ */
+void Task_Serial(void *argument);
 
 
 #ifdef __cplusplus

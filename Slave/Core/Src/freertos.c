@@ -78,11 +78,13 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
+  /* RC522 mutex: shared between CardRead and Serial tasks */
+  rc522MutexHandle = osMutexNew(NULL);
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
+  /* Serial command semaphore: ISR releases, Task_Serial acquires */
+  s_cmdSem = osSemaphoreNew(1, 0, NULL);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -129,6 +131,16 @@ void MX_FREERTOS_Init(void) {
           .priority = osPriorityNormal,
       };
       osThreadNew(Task_CardRead, NULL, &cardReadTask_attr);
+  }
+
+  /* Serial command processing task: USART1 host protocol */
+  {
+      static const osThreadAttr_t serialTask_attr = {
+          .name = "Task_Serial",
+          .stack_size = 256 * 4,
+          .priority = osPriorityNormal,
+      };
+      osThreadNew(Task_Serial, NULL, &serialTask_attr);
   }
   /* USER CODE END RTOS_THREADS */
 

@@ -742,7 +742,7 @@ void Task_CardRead(void *argument)
 
         /* ---- 寻卡 ---- */
         status = RC522_ScanCard(uid);
-        //printf("%d\r\n", (uint8_t)status);
+        printf("%d\r\n", (uint8_t)status);
 
         if (status == RC522_OK) {
             /* 填充基本信息 */
@@ -814,6 +814,13 @@ void Task_CardRead(void *argument)
                     osDelay(200);
 								}
 						}
+
+            /* Send card-removed signal to display task */
+            {
+                CardInfo_t removed_info;
+                memset(&removed_info, 0, sizeof(removed_info));
+                osMessageQueuePut(cardQueueHandle, &removed_info, 0, 0);
+            }
         }
 
         osDelay(CARD_READ_PERIOD_MS);
@@ -1056,7 +1063,6 @@ void Task_Display(void *argument)
 	}
 
     CardInfo_t card_info;
-    uint32_t card_show_deadline = 0;
     float    temperature = 0.0f;
     uint32_t last_temp_read = 0;
 
@@ -1091,6 +1097,7 @@ void Task_Display(void *argument)
                     field = (SetField_t)((uint8_t)field + 1U);
                     if (field >= FIELD_COUNT) {
                         dt.weekday = BSP_RTC_CalcWeekday(dt.year, dt.month, dt.day);
+                        dt.second = 0;
                         BSP_RTC_SetDateTime(&dt);
                         BSP_RTC_MarkInitialized();
                         mode = DISP_MODE_CLOCK;
@@ -1107,6 +1114,7 @@ void Task_Display(void *argument)
                 /* SAVE key: save & exit setting mode immediately */
                 if (mode == DISP_MODE_SETTING) {
                     dt.weekday = BSP_RTC_CalcWeekday(dt.year, dt.month, dt.day);
+                    dt.second = 0;
                     BSP_RTC_SetDateTime(&dt);
                     BSP_RTC_MarkInitialized();
                     mode = DISP_MODE_CLOCK;
@@ -1185,30 +1193,31 @@ void Task_Display(void *argument)
 
         /* ---- Check card queue (non-blocking) ---- */
         if (osMessageQueueGet(cardQueueHandle, &card_info, NULL, 0) == osOK) {
-            mode = DISP_MODE_CARD;
-            card_show_deadline = now + CARD_DISPLAY_MS;
-
-            /* Update card status LEDs */
-            LED_ON(LED1_GPIO_Port, LED1_Pin);
-            if (card_info.card_type == CARD_TYPE_NORMAL) {
-                LED_ON(LED2_GPIO_Port, LED2_Pin);
-                LED_OFF(LED3_GPIO_Port, LED3_Pin);
-            } else if (card_info.card_type == CARD_TYPE_IMAGE) {
-                LED_OFF(LED2_GPIO_Port, LED2_Pin);
-                LED_ON(LED3_GPIO_Port, LED3_Pin);
+            /* Check for card-removed signal (all-zero UID means card left) */
+            if (card_info.uid[0] == 0U && card_info.uid[1] == 0U &&
+                card_info.uid[2] == 0U && card_info.uid[3] == 0U) {
+                if (mode == DISP_MODE_CARD) {
+                    mode = DISP_MODE_CLOCK;
+                    LED_OFF(LED1_GPIO_Port, LED1_Pin);
+                    LED_OFF(LED2_GPIO_Port, LED2_Pin);
+                    LED_OFF(LED3_GPIO_Port, LED3_Pin);
+                }
             } else {
-                LED_OFF(LED2_GPIO_Port, LED2_Pin);
-                LED_OFF(LED3_GPIO_Port, LED3_Pin);
-            }
-        }
+                mode = DISP_MODE_CARD;
 
-        /* ---- Card display timeout ---- */
-        if (mode == DISP_MODE_CARD
-            && ((int32_t)(now - card_show_deadline) >= 0)) {
-            mode = DISP_MODE_CLOCK;
-            LED_OFF(LED1_GPIO_Port, LED1_Pin);
-            LED_OFF(LED2_GPIO_Port, LED2_Pin);
-            LED_OFF(LED3_GPIO_Port, LED3_Pin);
+                /* Update card status LEDs */
+                LED_ON(LED1_GPIO_Port, LED1_Pin);
+                if (card_info.card_type == CARD_TYPE_NORMAL) {
+                    LED_ON(LED2_GPIO_Port, LED2_Pin);
+                    LED_OFF(LED3_GPIO_Port, LED3_Pin);
+                } else if (card_info.card_type == CARD_TYPE_IMAGE) {
+                    LED_OFF(LED2_GPIO_Port, LED2_Pin);
+                    LED_ON(LED3_GPIO_Port, LED3_Pin);
+                } else {
+                    LED_OFF(LED2_GPIO_Port, LED2_Pin);
+                    LED_OFF(LED3_GPIO_Port, LED3_Pin);
+                }
+            }
         }
 
         /* ---- Render to OLED ---- */
