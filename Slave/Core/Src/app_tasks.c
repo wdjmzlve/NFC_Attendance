@@ -726,9 +726,46 @@ void Task_CardRead(void *argument)
                             3, default_key, uid) == RC522_OK) {
             RC522_WriteBlock(0, 1, write_buf);
         }
+        /*
+         * Write Name[] + Sector[] bitmaps to card sectors 9-15.
+         * Uses same mapped layout as serial UPDATEIMG command for consistency.
+         * Name: 160 bytes packed into 10 blocks via s_name_map
+         * Sector: 160 bytes packed into 10 blocks via s_dept_map
+         * Note: 161st byte of each array (last column of bitmap) is truncated
+         *       to fit the M1 card block layout.
+         */
+        {
+            uint16_t b;
+
+            /* Pack Name[161] into g_img_name[10][16] */
+            for (b = 0; b < IMG_NAME_BLOCKS; b++) {
+                uint16_t base = b * IMG_BLOCK_SIZE;
+                uint8_t k;
+                for (k = 0; k < IMG_BLOCK_SIZE; k++) {
+                    g_img_name[b][k] = (base + k < 161U) ? Name[base + k] : 0x00;
+                }
+            }
+
+            /* Pack Sector[161] into g_img_dept[10][16] */
+            for (b = 0; b < IMG_DEPT_BLOCKS; b++) {
+                uint16_t base = b * IMG_BLOCK_SIZE;
+                uint8_t k;
+                for (k = 0; k < IMG_BLOCK_SIZE; k++) {
+                    g_img_dept[b][k] = (base + k < 161U) ? Sector[base + k] : 0x00;
+                }
+            }
+
+            /* Write using same mapped layout as serial UPDATEIMG command */
+            if (write_blocks_mapped(g_img_name, s_name_map, IMG_NAME_BLOCKS) == 0) {
+                write_blocks_mapped(g_img_dept, s_dept_map, IMG_DEPT_BLOCKS);
+            }
+        }
+
         RC522_Halt();
         RC522_WaitCardOff();
     }
+							
+    
 
     for (;;) {
         char status;
@@ -770,6 +807,38 @@ void Task_CardRead(void *argument)
                           | ((uint32_t)block_data[5] << 16U)
                           | ((uint32_t)block_data[6] << 8U)
                           |  (uint32_t)block_data[7];
+                    }
+                }
+
+                /* Read Name + Sector bitmaps from card sectors 9-15 */
+                {
+                    uint8_t  blk_buf[16];
+                    uint8_t  sec = 9, blk = 0;
+                    uint16_t pos = 0;
+
+                    while (pos < BMP_TOTAL_BYTES && sec <= 15) {
+                        if (blk >= 3U) { blk = 0U; sec++; }
+                        if (sec > 15) break;
+
+                        if (RC522_AuthState(RC522_PICC_AUTHENT1A,
+                                            (uint8_t)(sec * 4U + 3U),
+                                            default_key, uid) == RC522_OK) {
+                            if (RC522_ReadBlock(sec, blk, blk_buf) == RC522_OK) {
+                                uint8_t k;
+                                for (k = 0; k < 16U && pos < BMP_TOTAL_BYTES; k++) {
+                                    if (pos < 161U) {
+                                        card_name_bmp[pos] = blk_buf[k];
+                                    } else {
+                                        card_sector_bmp[pos - 161U] = blk_buf[k];
+                                    }
+                                    pos++;
+                                }
+                            }
+                        }
+                        blk++;
+                    }
+                    if (pos > 0) {
+                        card_has_bmp = 1;
                     }
                 }
             }
