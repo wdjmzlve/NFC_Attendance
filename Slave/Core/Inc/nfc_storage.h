@@ -221,6 +221,36 @@ void LRU_Clear(void);
  */
 DeviceConfig_t *NFC_Storage_GetConfig(void);
 
+/* -------------------------------------------------------------------------- */
+/*  Upload Management APIs (Phase 3: Network)                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * @brief  Get current upload offset in data area (byte offset for next upload)
+ * @retval Byte offset from STORAGE_RECORD_BASE_ADDR
+ */
+uint32_t NFC_Storage_GetUploadOffset(void);
+
+/**
+ * @brief  Get current write offset in data area (byte offset for next write)
+ * @retval Byte offset from STORAGE_RECORD_BASE_ADDR
+ */
+uint32_t NFC_Storage_GetWriteOffset(void);
+
+/**
+ * @brief  Advance upload offset by one record (32 bytes) with circular wrap
+ * @note   Updates header checksum and writes to Flash. Mutex-protected.
+ */
+void NFC_Storage_AdvanceUploadOffset(void);
+
+/**
+ * @brief  Read a record at a specific byte offset in the data area
+ * @param  byte_offset: byte offset from STORAGE_RECORD_BASE_ADDR
+ * @param  rec: output record buffer
+ * @retval 1: success
+ */
+uint8_t NFC_Storage_GetRecordAtOffset(uint32_t byte_offset, AttendanceRecord_t *rec);
+
 #ifdef __cplusplus
 }
 #endif
