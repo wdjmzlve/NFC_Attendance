@@ -997,6 +997,7 @@ void Task_CardRead(void *argument)
         osMutexRelease(rc522MutexHandle);
 
         if (status == RC522_OK) {
+            uint32_t record_seq = 0;  /* captured below for serial response */
             /* ================================================================ */
             /*  Attendance Determination & Record Writing                        */
             /* ================================================================ */
@@ -1088,9 +1089,10 @@ void Task_CardRead(void *argument)
                     {
                         AttendanceRecord_t rec;
                         uint32_t total = NFC_Storage_GetTotalRecords();
+                        record_seq = total + 1;  /* captured for serial response below */
 
                         memset(&rec, 0, sizeof(rec));
-                        rec.seq        = total + 1;
+                        rec.seq        = record_seq;
                         memcpy(rec.uid, card_info.uid, 4);
                         rec.id_num     = card_info.id_num;
                         rec.card_type  = card_info.card_type;
@@ -1119,14 +1121,29 @@ void Task_CardRead(void *argument)
 
             /* Beep feedback */
             MIDI_Beep(9U, 80U);  /* C5 tone, 80ms */
-						char resp[64];
-						
-            snprintf(resp, sizeof(resp),
-                     "OK:UID=%02X%02X%02X%02X,SID=%lu,TYPE=%u\n",
-                     card_info.uid[0], card_info.uid[1], card_info.uid[2], card_info.uid[3],
-                     (unsigned long)card_info.id_num, (unsigned int)card_info.card_type);
-						
-            UartDrv_SendStr(&g_serialDrv, resp);
+            {
+                char resp[200];
+                snprintf(resp, sizeof(resp),
+                    "OK:SEQ=%lu,UID=%02X%02X%02X%02X,SID=%lu,"
+                    "EVT=%c,STS=%c,DT=%04u-%02u-%02u %02u:%02u:%02u,"
+                    "DUR=%lu,DEV=%u,OFS=%ld\n",
+                    (unsigned long)record_seq,
+                    card_info.uid[0], card_info.uid[1],
+                    card_info.uid[2], card_info.uid[3],
+                    (unsigned long)card_info.id_num,
+                    (card_info.att_event == ATT_EVENT_ENTRY) ? 'E' : 'X',
+                    (card_info.att_status == ATT_STATUS_NORMAL) ? 'N' :
+                    (card_info.att_status == ATT_STATUS_DUP)     ? 'D' :
+                    (card_info.att_status == ATT_STATUS_NO_ENTRY) ? 'E' : 'U',
+                    card_info.timestamp.year, card_info.timestamp.month,
+                    card_info.timestamp.day,
+                    card_info.timestamp.hour, card_info.timestamp.minute,
+                    card_info.timestamp.second,
+                    (unsigned long)card_info.duration_sec,
+                    (unsigned int)NFC_Storage_GetConfig()->dev_id,
+                    (long)NFC_Storage_GetConfig()->time_offset);
+                UartDrv_SendStr(&g_serialDrv, resp);
+            }
             /* 等待卡离开（不持互斥量） */
             uint8_t tagType[2];
             uint8_t fail_cnt = 0;
@@ -1214,6 +1231,7 @@ void Task_Serial(void *argument)
 
                 if (strcmp(cmd + 5, "ALL") == 0) {
                     count = total;
+                    if (count > 100U) count = 100U;  /* cap at last 100 */
                 } else {
                     count = 0;
                     const char *p = cmd + 5;
