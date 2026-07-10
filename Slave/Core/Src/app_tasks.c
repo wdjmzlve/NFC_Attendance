@@ -1058,6 +1058,8 @@ void Task_CardRead(void *argument)
                             card_info.att_event    = ATT_EVENT_EXIT;
                             card_info.att_status   = ATT_STATUS_NORMAL;
                             card_info.feedback     = FB_EVT_VALID_EXIT;
+                            /* Read timestamp from Flash even if LRU hit */
+                            NFC_Storage_FindLastByUID(card_info.uid, &last_rec);
                             card_info.duration_sec = calc_duration_sec(&last_rec,
                                                      &card_info.timestamp);
                         } else {
@@ -1071,6 +1073,8 @@ void Task_CardRead(void *argument)
                             card_info.att_event    = ATT_EVENT_EXIT;
                             card_info.att_status   = ATT_STATUS_NORMAL;
                             card_info.feedback     = FB_EVT_VALID_EXIT;
+                            /* Read timestamp from Flash even if LRU hit */
+                            NFC_Storage_FindLastByUID(card_info.uid, &last_rec);
                             card_info.duration_sec = calc_duration_sec(&last_rec,
                                                      &card_info.timestamp);
                         } else {
