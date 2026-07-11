@@ -38,15 +38,15 @@
 #define BLINK_PERIOD_MS         500U
 
 /* Network configuration (Phase 3: modify these for your environment) */
-#define WIFI_SSID               "Misaki"
-#define WIFI_PASSWORD           "Yc20231122"
+#define WIFI_SSID               "SSID"
+#define WIFI_PASSWORD           "wifi密码"
 #define TCP_SERVER_IP           "api.seniverse.com"
 #define TCP_SERVER_PORT         80U
 #define NTP_SERVER              "ntp.aliyun.com"
 #define NTP_TIMEZONE            8
 
 /* Seniverse (Xinzhi) Weather API key */
-#define WEATHER_API_KEY         "SOot2cNJy0vjvbzrc"
+#define WEATHER_API_KEY         "密钥"
 #define WEATHER_LOCATION        "hangzhou"
 #define WEATHER_LANGUAGE        "zh-Hans"
 #define WEATHER_UNIT            "c"
@@ -355,26 +355,15 @@ static int write_blocks_mapped(uint8_t (*data)[16], const SecBlk_t *sec_blk_map,
  * @retval 0:成功  负值:失败
  * @note   清除逻辑同 write_blocks_mapped，数据全为 0x00
  */
-static int clear_blocks_mapped(const SecBlk_t *sec_blk_map, uint16_t len)
+static int clear_blocks_mapped(const SecBlk_t *sec_blk_map, uint16_t len,
+                               uint8_t *uid)
 {
     uint8_t zeros[16];
     memset(zeros, 0, sizeof(zeros));
 
-    /* 用一块全零数据重复写入——write_blocks_mapped 从 data[i] 读 */
-    /* 为复用 write_blocks_mapped，构造一个临时二维数组 */
-    /* 这里直接逐块清零更简单 */
     uint8_t default_key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    uint8_t uid[4];
-    uint8_t tagType[2];
     char status;
     int8_t last_sector = -1;
-
-    status = RC522_Request(RC522_PICC_REQALL, tagType);
-    if (status != RC522_OK) return -1;
-    status = RC522_Anticoll(uid);
-    if (status != RC522_OK) return -1;
-    status = RC522_Select(uid);
-    if (status != RC522_OK) return -1;
 
     for (uint16_t i = 0; i < len; i++) {
         uint8_t sec = sec_blk_map[i].sec;
@@ -392,7 +381,6 @@ static int clear_blocks_mapped(const SecBlk_t *sec_blk_map, uint16_t len)
         if (status != RC522_OK) return -2;
     }
 
-    RC522_Halt();
     return 0;
 }
 
@@ -694,12 +682,13 @@ static void cmd_clear(const char *uid_hex)
     }
 
     /* 头像区域 */
-    ret = clear_blocks_mapped(s_avatar_map, IMG_AVATAR_BLOCKS);
+    ret = clear_blocks_mapped(s_avatar_map, IMG_AVATAR_BLOCKS, scanned_uid);
 
-    /* 姓名 + 部门区域 */
-    if (ret == 0) ret = clear_blocks_mapped(s_name_map, IMG_NAME_BLOCKS);
-    if (ret == 0) ret = clear_blocks_mapped(s_dept_map,  IMG_DEPT_BLOCKS);
+    /* name + department area */
+    if (ret == 0) ret = clear_blocks_mapped(s_name_map, IMG_NAME_BLOCKS, scanned_uid);
+    if (ret == 0) ret = clear_blocks_mapped(s_dept_map,  IMG_DEPT_BLOCKS, scanned_uid);
 
+    RC522_Halt();
     rc522_unlock();
     send_response((ret == 0) ? "OK\n" : "ERR\n");
 }
@@ -2196,7 +2185,7 @@ void Task_Display(void *argument)
             /* Logo on left half: 64x64 native page-format bitmap */
             OLED_DrawBitmap(0, 0, 64, 64, logo);
             OLED_SetFont(u8g2_font_wqy12_t_gb2312);
-            OLED_DrawUTF8(68, 36,  "姓名:杨城");
+            OLED_DrawUTF8(68, 36,  "姓名:xx");
 
 
             /* Chinese course name on right side (wqy12, 12px font) */
