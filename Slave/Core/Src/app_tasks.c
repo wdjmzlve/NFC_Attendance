@@ -19,6 +19,8 @@
 #include <string.h>
 #include "usart.h"
 #include "u8g2.h"
+#include "esp01s.h"
+#include "rtc.h"
 /* -------------------------------------------------------------------------- */
 /*  Constants and Macros                                                      */
 /* -------------------------------------------------------------------------- */
@@ -34,6 +36,27 @@
 #define KEY_LONG_PRESS_MS       600U
 #define KEY_REPEAT_MS           150U
 #define BLINK_PERIOD_MS         500U
+
+/* Network configuration (Phase 3: modify these for your environment) */
+#define WIFI_SSID               "SSID"
+#define WIFI_PASSWORD           "wifi密码"
+#define TCP_SERVER_IP           "api.seniverse.com"
+#define TCP_SERVER_PORT         80U
+#define NTP_SERVER              "ntp.aliyun.com"
+#define NTP_TIMEZONE            8
+
+/* Seniverse (Xinzhi) Weather API key */
+#define WEATHER_API_KEY         "密钥"
+#define WEATHER_LOCATION        "hangzhou"
+#define WEATHER_LANGUAGE        "zh-Hans"
+#define WEATHER_UNIT            "c"
+
+/* Network task timing (ms) */
+#define NETWORK_PERIOD_MS       1000U
+#define RECONNECT_INTERVAL_SEC  60U
+#define WEATHER_INTERVAL_MS     1800000U  /* 30 minutes */
+#define HEARTBEAT_INTERVAL_MS   60000U
+#define UPLOAD_ACK_TIMEOUT_MS   5000U
 
 /* Display layout Y coordinates (pixels) */
 #define LINE1_Y   12U
@@ -332,26 +355,15 @@ static int write_blocks_mapped(uint8_t (*data)[16], const SecBlk_t *sec_blk_map,
  * @retval 0:成功  负值:失败
  * @note   清除逻辑同 write_blocks_mapped，数据全为 0x00
  */
-static int clear_blocks_mapped(const SecBlk_t *sec_blk_map, uint16_t len)
+static int clear_blocks_mapped(const SecBlk_t *sec_blk_map, uint16_t len,
+                               uint8_t *uid)
 {
     uint8_t zeros[16];
     memset(zeros, 0, sizeof(zeros));
 
-    /* 用一块全零数据重复写入——write_blocks_mapped 从 data[i] 读 */
-    /* 为复用 write_blocks_mapped，构造一个临时二维数组 */
-    /* 这里直接逐块清零更简单 */
     uint8_t default_key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-    uint8_t uid[4];
-    uint8_t tagType[2];
     char status;
     int8_t last_sector = -1;
-
-    status = RC522_Request(RC522_PICC_REQALL, tagType);
-    if (status != RC522_OK) return -1;
-    status = RC522_Anticoll(uid);
-    if (status != RC522_OK) return -1;
-    status = RC522_Select(uid);
-    if (status != RC522_OK) return -1;
 
     for (uint16_t i = 0; i < len; i++) {
         uint8_t sec = sec_blk_map[i].sec;
@@ -369,7 +381,6 @@ static int clear_blocks_mapped(const SecBlk_t *sec_blk_map, uint16_t len)
         if (status != RC522_OK) return -2;
     }
 
-    RC522_Halt();
     return 0;
 }
 
@@ -671,12 +682,13 @@ static void cmd_clear(const char *uid_hex)
     }
 
     /* 头像区域 */
-    ret = clear_blocks_mapped(s_avatar_map, IMG_AVATAR_BLOCKS);
+    ret = clear_blocks_mapped(s_avatar_map, IMG_AVATAR_BLOCKS, scanned_uid);
 
-    /* 姓名 + 部门区域 */
-    if (ret == 0) ret = clear_blocks_mapped(s_name_map, IMG_NAME_BLOCKS);
-    if (ret == 0) ret = clear_blocks_mapped(s_dept_map,  IMG_DEPT_BLOCKS);
+    /* name + department area */
+    if (ret == 0) ret = clear_blocks_mapped(s_name_map, IMG_NAME_BLOCKS, scanned_uid);
+    if (ret == 0) ret = clear_blocks_mapped(s_dept_map,  IMG_DEPT_BLOCKS, scanned_uid);
 
+    RC522_Halt();
     rc522_unlock();
     send_response((ret == 0) ? "OK\n" : "ERR\n");
 }
@@ -974,6 +986,7 @@ void Task_CardRead(void *argument)
         osMutexRelease(rc522MutexHandle);
 
         if (status == RC522_OK) {
+            uint32_t record_seq = 0;  /* captured below for serial response */
             /* ================================================================ */
             /*  Attendance Determination & Record Writing                        */
             /* ================================================================ */
@@ -1035,6 +1048,8 @@ void Task_CardRead(void *argument)
                             card_info.att_event    = ATT_EVENT_EXIT;
                             card_info.att_status   = ATT_STATUS_NORMAL;
                             card_info.feedback     = FB_EVT_VALID_EXIT;
+                            /* Read timestamp from Flash even if LRU hit */
+                            NFC_Storage_FindLastByUID(card_info.uid, &last_rec);
                             card_info.duration_sec = calc_duration_sec(&last_rec,
                                                      &card_info.timestamp);
                         } else {
@@ -1048,6 +1063,8 @@ void Task_CardRead(void *argument)
                             card_info.att_event    = ATT_EVENT_EXIT;
                             card_info.att_status   = ATT_STATUS_NORMAL;
                             card_info.feedback     = FB_EVT_VALID_EXIT;
+                            /* Read timestamp from Flash even if LRU hit */
+                            NFC_Storage_FindLastByUID(card_info.uid, &last_rec);
                             card_info.duration_sec = calc_duration_sec(&last_rec,
                                                      &card_info.timestamp);
                         } else {
@@ -1061,9 +1078,10 @@ void Task_CardRead(void *argument)
                     {
                         AttendanceRecord_t rec;
                         uint32_t total = NFC_Storage_GetTotalRecords();
+                        record_seq = total + 1;  /* captured for serial response below */
 
                         memset(&rec, 0, sizeof(rec));
-                        rec.seq        = total + 1;
+                        rec.seq        = record_seq;
                         memcpy(rec.uid, card_info.uid, 4);
                         rec.id_num     = card_info.id_num;
                         rec.card_type  = card_info.card_type;
@@ -1092,14 +1110,29 @@ void Task_CardRead(void *argument)
 
             /* Beep feedback */
             MIDI_Beep(9U, 80U);  /* C5 tone, 80ms */
-						char resp[64];
-						
-            snprintf(resp, sizeof(resp),
-                     "OK:UID=%02X%02X%02X%02X,SID=%lu,TYPE=%u\n",
-                     card_info.uid[0], card_info.uid[1], card_info.uid[2], card_info.uid[3],
-                     (unsigned long)card_info.id_num, (unsigned int)card_info.card_type);
-						
-            UartDrv_SendStr(&g_serialDrv, resp);
+            {
+                char resp[200];
+                snprintf(resp, sizeof(resp),
+                    "OK:SEQ=%lu,UID=%02X%02X%02X%02X,SID=%lu,"
+                    "EVT=%c,STS=%c,DT=%04u-%02u-%02u %02u:%02u:%02u,"
+                    "DUR=%lu,DEV=%u,OFS=%ld\n",
+                    (unsigned long)record_seq,
+                    card_info.uid[0], card_info.uid[1],
+                    card_info.uid[2], card_info.uid[3],
+                    (unsigned long)card_info.id_num,
+                    (card_info.att_event == ATT_EVENT_ENTRY) ? 'E' : 'X',
+                    (card_info.att_status == ATT_STATUS_NORMAL) ? 'N' :
+                    (card_info.att_status == ATT_STATUS_DUP)     ? 'D' :
+                    (card_info.att_status == ATT_STATUS_NO_ENTRY) ? 'E' : 'U',
+                    card_info.timestamp.year, card_info.timestamp.month,
+                    card_info.timestamp.day,
+                    card_info.timestamp.hour, card_info.timestamp.minute,
+                    card_info.timestamp.second,
+                    (unsigned long)card_info.duration_sec,
+                    (unsigned int)NFC_Storage_GetConfig()->dev_id,
+                    (long)NFC_Storage_GetConfig()->time_offset);
+                UartDrv_SendStr(&g_serialDrv, resp);
+            }
             /* 等待卡离开（不持互斥量） */
             uint8_t tagType[2];
             uint8_t fail_cnt = 0;
@@ -1187,6 +1220,7 @@ void Task_Serial(void *argument)
 
                 if (strcmp(cmd + 5, "ALL") == 0) {
                     count = total;
+                    if (count > 100U) count = 100U;  /* cap at last 100 */
                 } else {
                     count = 0;
                     const char *p = cmd + 5;
@@ -1248,6 +1282,359 @@ void Serial_Cmd_Init(void)
 
     /* 启动空闲中断接收 */
     UartDrv_StartRecv(&g_serialDrv);
+}
+
+/* ========================================================================== */
+/*  Phase 3: Network Communication                                             */
+/* ========================================================================== */
+
+/* ---- Network globals ---- */
+
+/** UART driver instance for ESP01S (USART6) */
+static UartDrv_t g_espDrv;
+
+/** Weather info cache, written by Task_Network, read by Task_Display */
+WeatherInfo_t g_weather;
+
+/** Network status: written by Task_Network, read by Task_Display */
+volatile NetStatus_t g_net_status = NET_STAT_OFFLINE;
+
+/** Pending upload record count: written by Task_Network, read by Task_Display */
+volatile uint32_t g_net_pending = 0;
+
+/** Upload ACK flag: set to 1 by RX callback when "OK\n" received */
+static volatile uint8_t g_upload_ack = 0;
+
+/* ---- Network RX callback (ISR context) ---- */
+
+/**
+ * @brief  TCP data receive callback for upload ACK detection
+ * @note   Called from UART ISR context, sets flag only, returns quickly
+ */
+static void Network_RxCallback(const uint8_t *pData, uint16_t len, void *pUserCtx)
+{
+    (void)pUserCtx;
+    if (len >= 2 && pData[0] == 'O' && pData[1] == 'K') {
+        g_upload_ack = 1;
+    }
+}
+
+/* ---- Upload helpers ---- */
+
+/**
+ * @brief  Upload all pending attendance records to server via transparent mode
+ * @note   Sends one record at a time, waits for "OK\n" ACK before next.
+ *         Stops on first failure or when all records are synced.
+ */
+static void upload_pending_records(void)
+{
+    AttendanceRecord_t rec;
+    char line[160];
+    uint32_t upload_off;
+    uint32_t write_off;
+    uint32_t timeout;
+
+    upload_off = NFC_Storage_GetUploadOffset();
+    write_off  = NFC_Storage_GetWriteOffset();
+
+    while (upload_off != write_off) {
+        /* Read record at current upload offset */
+        if (!NFC_Storage_GetRecordAtOffset(upload_off, &rec)) {
+            break;
+        }
+
+        /* Build "ATT:..." upload line */
+        snprintf(line, sizeof(line),
+                 "ATT:SEQ=%lu,UID=%02X%02X%02X%02X,SID=%lu,"
+                 "EVT=%c,STS=%c,DT=%04u-%02u-%02u %02u:%02u:%02u,"
+                 "DUR=%lu,DEV=%u,OFS=%ld\n",
+                 (unsigned long)rec.seq,
+                 rec.uid[0], rec.uid[1], rec.uid[2], rec.uid[3],
+                 (unsigned long)rec.id_num,
+                 (rec.event == ATT_EVENT_ENTRY) ? 'E' : 'X',
+                 (rec.status == ATT_STATUS_NORMAL) ? 'N' :
+                 (rec.status == ATT_STATUS_DUP) ? 'D' :
+                 (rec.status == ATT_STATUS_NO_ENTRY) ? 'E' : 'U',
+                 rec.year, rec.month, rec.day,
+                 rec.hour, rec.minute, rec.second,
+                 (unsigned long)rec.duration,
+                 (unsigned int)rec.dev_id,
+                 (long)rec.time_offset);
+
+        /* Send record, wait for ACK */
+        g_upload_ack = 0;
+        ESP01S_SendStr(line);
+
+        timeout = UPLOAD_ACK_TIMEOUT_MS / 100U;
+        while (timeout > 0 && g_upload_ack == 0) {
+            osDelay(100);
+            timeout--;
+        }
+
+        if (g_upload_ack) {
+            /* ACK received, advance upload offset */
+            NFC_Storage_AdvanceUploadOffset();
+            upload_off = NFC_Storage_GetUploadOffset();
+        } else {
+            /* Timeout, retry next cycle */
+            break;
+        }
+    }
+}
+
+/* ---- Weather helper ---- */
+
+/**
+ * @brief  Query weather once from Seniverse API
+ * @note   Updates g_weather on success, clears valid flag on failure.
+ *         ESP01S_QueryWeather handles transparent exit/restore internally.
+ */
+static void query_weather_once(void)
+{
+    int ret;
+
+    ret = ESP01S_QueryWeather(WEATHER_API_KEY, WEATHER_LOCATION,
+                              WEATHER_LANGUAGE, WEATHER_UNIT,
+                              g_weather.city, sizeof(g_weather.city),
+                              g_weather.textDay, sizeof(g_weather.textDay),
+                              g_weather.high, sizeof(g_weather.high),
+                              g_weather.textNight, sizeof(g_weather.textNight),
+                              g_weather.low, sizeof(g_weather.low),
+                              g_weather.precip, sizeof(g_weather.precip));
+
+    if (ret == 0) {
+        g_weather.valid = 1;
+        g_weather.queryTick = HAL_GetTick();
+    } else {
+        g_weather.valid = 0;
+    }
+}
+
+/* ---- Heartbeat helper ---- */
+
+/**
+ * @brief  Send heartbeat frame to server
+ * @note   Format: HB:DEV=N,TS=YYYY-MM-DD HH:MM:SS,REC=N\n
+ */
+static void send_heartbeat(void)
+{
+    BSP_RTC_DateTime_t dt;
+    char line[96];
+    uint32_t pending;
+
+    BSP_RTC_GetDateTime(&dt);
+
+    {
+        uint32_t upload_off = NFC_Storage_GetUploadOffset();
+        uint32_t write_off  = NFC_Storage_GetWriteOffset();
+        uint32_t total = NFC_Storage_GetTotalRecords();
+        /* Estimate pending: records not yet uploaded */
+        if (total > 0) {
+            /* Rough estimate based on byte offsets */
+            if (write_off >= upload_off) {
+                pending = (write_off - upload_off) / STORAGE_RECORD_SIZE;
+            } else {
+                pending = ((STORAGE_DATA_TOTAL_BYTES - upload_off) + write_off)
+                          / STORAGE_RECORD_SIZE;
+            }
+        } else {
+            pending = 0;
+        }
+
+        snprintf(line, sizeof(line),
+                 "HB:DEV=%u,TS=%04u-%02u-%02u %02u:%02u:%02u,REC=%lu,PEND=%lu\n",
+                 (unsigned int)NFC_Storage_GetConfig()->dev_id,
+                 dt.year, dt.month, dt.day,
+                 dt.hour, dt.minute, dt.second,
+                 (unsigned long)total, (unsigned long)pending);
+    }
+
+    ESP01S_SendStr(line);
+}
+
+/* ---- Time offset helper ---- */
+
+/**
+ * @brief  Update time_offset in device config after NTP sync
+ * @note   Calculates offset = server_time - local_time and saves to Flash
+ */
+static void update_time_offset(void)
+{
+    DeviceConfig_t *cfg = NFC_Storage_GetConfig();
+    DeviceConfig_t new_cfg;
+    BSP_RTC_DateTime_t dt;
+    int32_t ntp_ts;
+    int32_t local_ts;
+
+    /* Read current local RTC time */
+    BSP_RTC_GetDateTime(&dt);
+
+    /* Convert local RTC to Unix timestamp using day-count formula */
+    {
+        uint16_t y = dt.year;
+        uint8_t  m = dt.month;
+        uint8_t  d = dt.day;
+        int32_t days;
+
+        /* Days from 1970 to given date (approximate) */
+        if (m <= 2) { y--; m += 12; }
+        days = (int32_t)(365 * (int32_t)y + (int32_t)(y / 4) - (int32_t)(y / 100)
+               + (int32_t)(y / 400) + (int32_t)((153 * (int32_t)m + 8) / 5)
+               + (int32_t)d - 719469);
+
+        local_ts = days * 86400L
+                 + (int32_t)dt.hour * 3600L
+                 + (int32_t)dt.minute * 60L
+                 + (int32_t)dt.second;
+    }
+
+    /* Get NTP time as Unix timestamp via ESP01S_GetDateTime */
+    {
+        char ntp_buf[24];
+        if (ESP01S_GetDateTime(NULL, DT_ALL, ntp_buf, sizeof(ntp_buf)) == 0) {
+            int ny, nm, nd, nh, nmin, ns;
+            if (sscanf(ntp_buf, "%d-%d-%d %d:%d:%d",
+                       &ny, &nm, &nd, &nh, &nmin, &ns) == 6) {
+                int32_t ndays;
+                uint16_t ny_u = (uint16_t)ny;
+                uint8_t  nm_u = (uint8_t)nm;
+                uint8_t  nd_u = (uint8_t)nd;
+                if (nm_u <= 2) { ny_u--; nm_u += 12; }
+                ndays = (int32_t)(365 * (int32_t)ny_u + (int32_t)(ny_u / 4)
+                       - (int32_t)(ny_u / 100) + (int32_t)(ny_u / 400)
+                       + (int32_t)((153 * (int32_t)nm_u + 8) / 5)
+                       + (int32_t)nd_u - 719469);
+                ntp_ts = ndays * 86400L
+                       + (int32_t)nh * 3600L
+                       + (int32_t)nmin * 60L
+                       + (int32_t)ns;
+
+                cfg->time_offset = ntp_ts - local_ts;
+            }
+        }
+    }
+
+    /* Save config with updated time_offset */
+    memcpy(&new_cfg, cfg, sizeof(DeviceConfig_t));
+    new_cfg.checksum = 0;
+    {
+        const uint8_t *p = (const uint8_t *)&new_cfg;
+        uint16_t sum = 0;
+        uint8_t i;
+        for (i = 0; i < 14U; i++) {
+            sum += (uint16_t)p[i];
+        }
+        new_cfg.checksum = sum;
+    }
+    NFC_Storage_SaveConfig(&new_cfg);
+}
+
+/* ---- Network Task ---- */
+
+/**
+ * @brief  Network communication task: WiFi+NTP+TCP upload+weather+heartbeat
+ * @note   Handles full ESP01S lifecycle. Blocking ESP01S_Start() calls
+ *         are safe here because this is a low-priority dedicated task.
+ */
+void Task_Network(void *argument)
+{
+    int ret;
+    uint32_t reconnect_timer = 0;
+    uint32_t weather_timer   = 0;
+    uint32_t heartbeat_timer = 0;
+
+    (void)argument;
+
+    g_net_status = NET_STAT_OFFLINE;
+    g_net_pending = 0;
+
+    /* ---- One-time hardware init ---- */
+    UartDrv_Init(&g_espDrv, &huart6);
+    ESP01S_Init(&g_espDrv);
+
+    /* Configure WiFi, TCP server, NTP */
+    ESP01S_SetWiFi(WIFI_SSID, WIFI_PASSWORD);
+    ESP01S_SetTcpServer(TCP_SERVER_IP, TCP_SERVER_PORT);
+    ESP01S_SetNtpServer(NTP_SERVER, NTP_TIMEZONE);
+
+    /* Register TCP data callback for upload ACK detection */
+    ESP01S_RegisterDataCb(Network_RxCallback, NULL);
+
+    /* Initial connection (blocking ~15s) */
+    ret = ESP01S_Start();
+    if (ret == 0) {
+        /* NTP time sync -> RTC */
+        ESP01S_SetRtcFromNtp(&hrtc);
+        update_time_offset();
+    }
+
+    /* ---- Main loop (1s period) ---- */
+    for (;;) {
+        ESP01S_State_t st = ESP01S_GetState();
+
+        if (st == ESP01S_STATE_TRANSPARENT) {
+            /* Connected and in transparent mode — do work */
+            g_net_status = NET_STAT_ONLINE;
+
+            /* Calculate pending count for display */
+            {
+                uint32_t up_off = NFC_Storage_GetUploadOffset();
+                uint32_t wr_off = NFC_Storage_GetWriteOffset();
+                if (wr_off >= up_off) {
+                    g_net_pending = (wr_off - up_off) / STORAGE_RECORD_SIZE;
+                } else {
+                    g_net_pending = ((STORAGE_DATA_TOTAL_BYTES - up_off) + wr_off)
+                                    / STORAGE_RECORD_SIZE;
+                }
+            }
+
+            /* Upload pending attendance records */
+            if (g_net_pending > 0) {
+                g_net_status = NET_STAT_SYNCING;
+            }
+            upload_pending_records();
+
+            /* Re-check pending after upload */
+            {
+                uint32_t up_off = NFC_Storage_GetUploadOffset();
+                uint32_t wr_off = NFC_Storage_GetWriteOffset();
+                if (wr_off >= up_off) {
+                    g_net_pending = (wr_off - up_off) / STORAGE_RECORD_SIZE;
+                } else {
+                    g_net_pending = ((STORAGE_DATA_TOTAL_BYTES - up_off) + wr_off)
+                                    / STORAGE_RECORD_SIZE;
+                }
+            }
+            g_net_status = (g_net_pending == 0) ? NET_STAT_ONLINE : NET_STAT_SYNCING;
+
+            /* Heartbeat (every 60s) */
+            if (HAL_GetTick() - heartbeat_timer >= HEARTBEAT_INTERVAL_MS) {
+                send_heartbeat();
+                heartbeat_timer = HAL_GetTick();
+            }
+
+            /* Weather query (every 30 min) */
+            if (HAL_GetTick() - weather_timer >= WEATHER_INTERVAL_MS) {
+                query_weather_once();
+                weather_timer = HAL_GetTick();
+            }
+        } else {
+            /* Disconnected or connecting — attempt reconnect */
+            g_net_status = NET_STAT_OFFLINE;
+            g_net_pending = 0;
+            reconnect_timer++;
+            if (reconnect_timer >= RECONNECT_INTERVAL_SEC) {
+                ret = ESP01S_Start();
+                if (ret == 0) {
+                    ESP01S_SetRtcFromNtp(&hrtc);
+                    update_time_offset();
+                }
+                reconnect_timer = 0;
+            }
+        }
+
+        osDelay(NETWORK_PERIOD_MS);
+    }
 }
 
 /* ========================================================================== */
@@ -1798,7 +2185,7 @@ void Task_Display(void *argument)
             /* Logo on left half: 64x64 native page-format bitmap */
             OLED_DrawBitmap(0, 0, 64, 64, logo);
             OLED_SetFont(u8g2_font_wqy12_t_gb2312);
-            OLED_DrawUTF8(68, 36,  "姓名:杨城");
+            OLED_DrawUTF8(68, 36,  "姓名:xx");
 
 
             /* Chinese course name on right side (wqy12, 12px font) */
@@ -1826,10 +2213,16 @@ void Task_Display(void *argument)
                      dt.hour, dt.minute, dt.second);
             OLED_ShowString(0, LINE2_Y, line_buf);
 
-            /* Status text */
-            OLED_ShowString(0, LINE3_Y, "Waiting card...");
+            /* Status or weather text (LINE3) */
+            if (g_weather.valid) {
+                snprintf(line_buf, sizeof(line_buf), "%s %s~%sC",
+                         g_weather.textDay, g_weather.high, g_weather.low);
+                OLED_ShowString(0, LINE3_Y, line_buf);
+            } else {
+                OLED_ShowString(0, LINE3_Y, "Waiting card...");
+            }
 
-            /* Temperature: right-aligned at bottom */
+            /* Temperature: right-aligned at LINE4 */
             snprintf(line_buf, sizeof(line_buf),
                      "%.1fC", (double)temperature);
             {

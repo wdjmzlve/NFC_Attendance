@@ -32,6 +32,8 @@
 #include "w25q128.h"
 #include "midi.h"
 #include "tim.h"
+#include "uart_drv.h"
+#include "esp01s.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -147,6 +149,16 @@ void MX_FREERTOS_Init(void) {
           .priority = osPriorityNormal,
       };
       osThreadNew(Task_Serial, NULL, &serialTask_attr);
+  }
+
+  /* Network communication task: WiFi + NTP + Record Upload + Weather (Phase 3) */
+  {
+      static const osThreadAttr_t networkTask_attr = {
+          .name = "Task_Network",
+          .stack_size = 512 * 4,   /* ESP01S_Start uses snprintf/printf/JSON, needs room */
+          .priority = osPriorityLow,  /* Low priority, won't block UI or card reading */
+      };
+      osThreadNew(Task_Network, NULL, &networkTask_attr);
   }
   /* USER CODE END RTOS_THREADS */
 

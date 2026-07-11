@@ -397,6 +397,72 @@ DeviceConfig_t *NFC_Storage_GetConfig(void)
 }
 
 /* ========================================================================== */
+/*  Upload Management (Phase 3: Network)                                        */
+/* ========================================================================== */
+
+/**
+ * @brief  Get current upload offset (byte offset in data area for next upload)
+ */
+uint32_t NFC_Storage_GetUploadOffset(void)
+{
+    uint32_t offset;
+    osMutexAcquire(storageMutexHandle, osWaitForever);
+    offset = g_rec_header.upload_offset;
+    osMutexRelease(storageMutexHandle);
+    return offset;
+}
+
+/**
+ * @brief  Get current write offset (byte offset in data area for next write)
+ */
+uint32_t NFC_Storage_GetWriteOffset(void)
+{
+    uint32_t offset;
+    osMutexAcquire(storageMutexHandle, osWaitForever);
+    offset = g_rec_header.write_offset;
+    osMutexRelease(storageMutexHandle);
+    return offset;
+}
+
+/**
+ * @brief  Advance upload offset by one record (32 bytes) with circular wrap
+ * @note   Recalculates header checksum and writes to Flash.
+ *         Must be called after a successful upload ACK.
+ */
+void NFC_Storage_AdvanceUploadOffset(void)
+{
+    osMutexAcquire(storageMutexHandle, osWaitForever);
+
+    g_rec_header.upload_offset += STORAGE_RECORD_SIZE;
+    if (g_rec_header.upload_offset >= STORAGE_DATA_TOTAL_BYTES) {
+        g_rec_header.upload_offset = 0;
+    }
+
+    write_header_to_flash();
+
+    osMutexRelease(storageMutexHandle);
+}
+
+/**
+ * @brief  Read a record at a specific byte offset in the data area
+ * @param  byte_offset: byte offset from STORAGE_RECORD_BASE_ADDR
+ * @param  rec: output record buffer (32 bytes)
+ * @retval 1: success (always succeeds for valid offsets)
+ * @note   Caller must ensure byte_offset is valid (0 <= offset < STORAGE_DATA_TOTAL_BYTES
+ *         and offset % STORAGE_RECORD_SIZE == 0)
+ */
+uint8_t NFC_Storage_GetRecordAtOffset(uint32_t byte_offset, AttendanceRecord_t *rec)
+{
+    if (byte_offset >= STORAGE_DATA_TOTAL_BYTES) return 0;
+    if ((byte_offset % STORAGE_RECORD_SIZE) != 0) return 0;
+
+    W25QXX_Read((uint8_t *)rec,
+                STORAGE_RECORD_BASE_ADDR + byte_offset,
+                STORAGE_RECORD_SIZE);
+    return 1;
+}
+
+/* ========================================================================== */
 /*  LRU Cache                                                                  */
 /* ========================================================================== */
 

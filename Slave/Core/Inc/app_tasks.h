@@ -131,6 +131,49 @@ void Serial_Cmd_Init(void);
  */
 void Task_Serial(void *argument);
 
+/* -------------------------------------------------------------------------- */
+/*  Weather Info Structure (Phase 3: Network)                                  */
+/* -------------------------------------------------------------------------- */
+
+/** Weather information cached by Task_Network and displayed on clock page */
+typedef struct {
+    char     city[16];       /**< City name (e.g. "hangzhou")                 */
+    char     textDay[32];    /**< Daytime weather description                 */
+    char     high[8];        /**< Daytime high temperature (e.g. "25")        */
+    char     textNight[32];  /**< Nighttime weather description               */
+    char     low[8];         /**< Nighttime low temperature (e.g. "18")       */
+    char     precip[8];      /**< Precipitation probability (e.g. "0")        */
+    uint8_t  valid;          /**< 1 = valid weather data available            */
+    uint32_t queryTick;      /**< HAL_GetTick() value at last query           */
+} WeatherInfo_t;
+
+/** Global weather cache, written by Task_Network, read by Task_Display */
+extern WeatherInfo_t g_weather;
+
+/**
+ * @brief  Network communication task: WiFi connect, NTP sync, record upload,
+ *         weather query, heartbeat
+ * @param  argument: unused
+ * @note   Handles ESP01S lifecycle: init -> WiFi -> NTP -> TCP -> transparent.
+ *         Periodically uploads pending attendance records, queries weather,
+ *         and reconnects on disconnection.
+ */
+void Task_Network(void *argument);
+
+/* -------------------------------------------------------------------------- */
+/*  Network Status (Phase 3: written by Task_Network, read by Task_Display)   */
+/* -------------------------------------------------------------------------- */
+
+/** Network state for OLED display */
+typedef enum {
+    NET_STAT_OFFLINE = 0,  /**< WiFi disconnected or connecting               */
+    NET_STAT_ONLINE  = 1,  /**< WiFi + TCP connected, transparent mode        */
+    NET_STAT_SYNCING = 2,  /**< Uploading records right now                   */
+} NetStatus_t;
+
+extern volatile NetStatus_t g_net_status;
+extern volatile uint32_t    g_net_pending;   /**< Pending upload record count */
+
 
 #ifdef __cplusplus
 }
